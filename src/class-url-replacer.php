@@ -619,7 +619,7 @@ final class URL_Replacer {
 	 * @return string
 	 */
 	private function encode_url_path( $url ) {
-		$path = (string) parse_url( $url, PHP_URL_PATH );
+		$path = $this->extract_path( $url );
 		return str_replace( $path, $this->encode_path( $path ), $url );
 	}
 
@@ -635,6 +635,26 @@ final class URL_Replacer {
 		unset( $segment );
 
 		return implode( '/', $segments );
+	}
+
+	/**
+	 * Extract the uploads path even when the original URL contains raw Unicode.
+	 *
+	 * @param string $url URL or path.
+	 * @return string
+	 */
+	private function extract_path( $url ) {
+		if ( 0 === strpos( $url, '/wp-content/' ) || 0 === strpos( $url, '\\/wp-content\\/' ) ) {
+			return str_replace( '\\/', '/', $url );
+		}
+
+		$normalized = str_replace( '\\/', '/', $url );
+		$position   = strpos( $normalized, '/wp-content/' );
+		if ( false === $position ) {
+			return '';
+		}
+
+		return substr( $normalized, $position );
 	}
 
 	/**

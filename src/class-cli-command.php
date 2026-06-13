@@ -427,6 +427,145 @@ final class CLI_Command {
 	}
 
 	/**
+	 * Export exact redirect mappings from migrated manifest rows.
+	 *
+	 * ## OPTIONS
+	 *
+	 * --format=<apache|nginx|csv>
+	 * : Export format to generate.
+	 *
+	 * [--output=<path>]
+	 * : Optional destination path. If omitted, the export is printed to STDOUT.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp media-flatten redirects --format=apache
+	 *     wp media-flatten redirects --format=nginx --output=/tmp/media-flatten.conf
+	 *     wp media-flatten redirects --format=csv
+	 *
+	 * @param array<int, string>   $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Named arguments.
+	 * @return void
+	 */
+	public function redirects( $args, $assoc_args ) {
+		$format = strtolower( trim( (string) \WP_CLI\Utils\get_flag_value( $assoc_args, 'format', '' ) ) );
+		$output = isset( $assoc_args['output'] ) ? (string) $assoc_args['output'] : null;
+
+		if ( ! in_array( $format, array( 'apache', 'nginx', 'csv' ), true ) ) {
+			\WP_CLI::error( 'Use --format=apache, --format=nginx, or --format=csv.' );
+		}
+
+		try {
+			$repository = new Manifest_Repository();
+			if ( ! $repository->table_exists() ) {
+				\WP_CLI::error( 'Manifest table is not installed. Run: wp media-flatten install' );
+			}
+
+			$service = new Redirect_Export_Service( $repository );
+			$readiness = $service->readiness();
+			if ( empty( $readiness['ready'] ) ) {
+				\WP_CLI::warning( 'Redirect export readiness checks have not fully passed. Review the warnings before using the generated file.' );
+				foreach ( $readiness['warnings'] as $warning ) {
+					\WP_CLI::warning( $warning );
+				}
+			}
+
+			$result = $service->generate( $format, $output, 500, true );
+			$this->format_key_value_summary(
+				array(
+					'format'                  => $result['format'],
+					'generated_at'            => $result['generated_at'],
+					'redirect_rule_count'     => $result['redirect_rule_count'],
+					'total_migrated_mappings'  => $result['total_migrated_mappings'],
+					'deduplicated_mappings'    => $result['deduplicated_mappings'],
+					'skipped_same_path'        => $result['skipped_same_path'],
+					'unicode_filename_count'   => $result['unicode_filename_count'],
+					'ready'                   => $result['ready'] ? 'yes' : 'no',
+				)
+			);
+
+			if ( $result['warnings'] ) {
+				\WP_CLI::log( 'Export warnings:' );
+				foreach ( $result['warnings'] as $warning ) {
+					\WP_CLI::warning( $warning );
+				}
+			}
+			if ( $result['errors'] ) {
+				\WP_CLI::log( 'Export errors:' );
+				foreach ( $result['errors'] as $error ) {
+					\WP_CLI::warning( $error );
+				}
+			}
+
+			if ( null === $output ) {
+				\WP_CLI::line( $result['content'] );
+			} else {
+				\WP_CLI::success( 'Redirect export written to: ' . $output );
+			}
+		} catch ( \RuntimeException $exception ) {
+			\WP_CLI::error( $exception->getMessage() );
+		}
+	}
+
+	/**
+	 * Run the pre-redirect old dated upload URL audit.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--json]
+	 * : Output valid machine-readable JSON.
+	 *
+	 * [--strict]
+	 * : Exit with an error when unsafe old URLs remain.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp media-flatten audit-old-urls
+	 *     wp media-flatten audit-old-urls --json
+	 *     wp media-flatten audit-old-urls --strict
+	 *
+	 * @param array<int, string>   $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Named arguments.
+	 * @return void
+	 */
+	public function audit_old_urls( $args, $assoc_args ) {
+		$json   = isset( $assoc_args['json'] );
+		$strict = isset( $assoc_args['strict'] );
+
+		try {
+			$repository = new Manifest_Repository();
+			if ( ! $repository->table_exists() ) {
+				\WP_CLI::error( 'Manifest table is not installed. Run: wp media-flatten install' );
+			}
+
+			$result = ( new Old_URL_Audit_Service( $repository ) )->run( 100 );
+			if ( $json ) {
+				\WP_CLI::line( wp_json_encode( $result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) );
+			} else {
+				\WP_CLI::log( 'Old URL audit: ' . ( $result['safe'] ? 'SAFE' : 'UNSAFE' ) );
+				$this->format_key_value_summary(
+					array(
+						'audited_at'                          => $result['audited_at'],
+						'migrated_mapping_old_url_remaining' => $result['migrated_mapping_old_url_remaining'],
+						'non_migrated_manifest_url_remaining' => $result['non_migrated_manifest_url_remaining'],
+						'orphan_old_upload_url_remaining'    => $result['orphan_old_upload_url_remaining'],
+						'generic_dated_upload_occurrences'   => $result['generic_dated_upload_occurrences'],
+					)
+				);
+			}
+
+			if ( $strict && ! $result['safe'] ) {
+				\WP_CLI::error( 'Old URL audit found unsafe dated upload URLs.' );
+			}
+			if ( ! $json ) {
+				\WP_CLI::success( 'Read-only old URL audit complete. No files or database records were changed.' );
+			}
+		} catch ( \RuntimeException $exception ) {
+			\WP_CLI::error( $exception->getMessage() );
+		}
+	}
+
+	/**
 	 * Run comprehensive read-only migration verification.
 	 *
 	 * ## OPTIONS
@@ -471,7 +610,11 @@ final class CLI_Command {
 						'missing_new_files'    => $result['missing_new_files'],
 						'integrity_mismatches' => $result['integrity_mismatches'],
 						'metadata_errors'      => $result['metadata_errors'],
-						'remaining_old_urls'   => array_sum( $result['old_url_occurrences'] ),
+						'migrated_old_urls'    => $result['migrated_mapping_old_url_remaining'],
+						'non_migrated_old_urls' => $result['non_migrated_manifest_url_remaining'],
+						'orphan_old_urls'      => $result['orphan_old_upload_url_remaining'],
+						'pre_redirect_ready'   => $result['pre_redirect_ready'] ? 'yes' : 'no',
+						'redirect_export_ready' => $result['redirect_export_ready'] ? 'yes' : 'no',
 					)
 				);
 				\WP_CLI::log( 'Sample errors:' );
@@ -537,13 +680,11 @@ final class CLI_Command {
 
 		$usage_reporter = new Usage_Reporter( $repository );
 		$batch_reporter = new Batch_Migrator( $repository, new Single_Attachment_Migrator( $repository ) );
-		$url_replacer   = new URL_Replacer( $repository->get_migrated_url_mappings() );
+		$verify         = get_option( Admin_Controller::VERIFY_RESULT_OPTION, array() );
+		$old_url_audit  = get_option( Admin_Controller::OLD_URL_AUDIT_RESULT_OPTION, array() );
 
 		\WP_CLI::log( 'Attachment batch migration readiness:' );
 		$this->format_key_value_summary( $batch_reporter->report_counts() );
-
-		\WP_CLI::log( 'Remaining migrated URL references:' );
-		$this->format_key_value_summary( $url_replacer->remaining_counts() );
 
 		\WP_CLI::log( 'Manifest attachment usage:' );
 		$this->format_items(
@@ -569,7 +710,7 @@ final class CLI_Command {
 			array( 'metric', 'value' )
 		);
 
-		$verify = get_option( 'media_flatten_last_verify_result', array() );
+		$verify = get_option( Admin_Controller::VERIFY_RESULT_OPTION, array() );
 		\WP_CLI::log( 'Latest verification summary:' );
 		$this->format_key_value_summary(
 			$verify
@@ -581,6 +722,41 @@ final class CLI_Command {
 					'missing_new_files'    => $verify['missing_new_files'] ?? 0,
 					'integrity_mismatches' => $verify['integrity_mismatches'] ?? 0,
 					'metadata_errors'      => $verify['metadata_errors'] ?? 0,
+					'pre_redirect_ready'   => ! empty( $verify['pre_redirect_ready'] ) ? 'yes' : 'no',
+					'redirect_export_ready' => ! empty( $verify['redirect_export_ready'] ) ? 'yes' : 'no',
+				)
+				: array( 'status' => 'Not run yet' )
+		);
+
+		$old_url_audit = get_option( Admin_Controller::OLD_URL_AUDIT_RESULT_OPTION, array() );
+		$redirect_export = get_option( Admin_Controller::REDIRECT_EXPORT_RESULT_OPTION, array() );
+		$redirect_service = new Redirect_Export_Service( $repository );
+		$redirect_readiness = $redirect_service->readiness();
+		\WP_CLI::log( 'Latest old URL audit summary:' );
+		$this->format_key_value_summary(
+			$old_url_audit
+				? array(
+					'status'                              => ! empty( $old_url_audit['safe'] ) ? 'SAFE' : 'UNSAFE',
+					'audited_at'                          => $old_url_audit['audited_at'] ?? '-',
+					'migrated_mapping_old_url_remaining' => $old_url_audit['migrated_mapping_old_url_remaining'] ?? 0,
+					'non_migrated_manifest_url_remaining' => $old_url_audit['non_migrated_manifest_url_remaining'] ?? 0,
+					'orphan_old_upload_url_remaining'    => $old_url_audit['orphan_old_upload_url_remaining'] ?? 0,
+				)
+				: array( 'status' => 'Not run yet' )
+		);
+
+		\WP_CLI::log( 'Latest redirect export summary:' );
+		$this->format_key_value_summary(
+			$redirect_export
+				? array(
+					'generated_at'         => $redirect_readiness['generated_at'] ?? ( $redirect_export['generated_at'] ?? '-' ),
+					'ready'                => ! empty( $redirect_readiness['ready'] ) ? 'yes' : 'no',
+					'latest_apache_file'   => $redirect_export['exports']['apache']['file_name'] ?? '-',
+					'latest_nginx_file'    => $redirect_export['exports']['nginx']['file_name'] ?? '-',
+					'latest_csv_file'      => $redirect_export['exports']['csv']['file_name'] ?? '-',
+					'redirect_rule_count'  => $redirect_readiness['redirect_rules_to_export'] ?? ( $redirect_export['latest_preview']['redirect_rule_count'] ?? 0 ),
+					'export_warnings_count' => isset( $redirect_export['warnings'] ) ? count( $redirect_export['warnings'] ) : 0,
+					'export_errors_count'   => isset( $redirect_export['errors'] ) ? count( $redirect_export['errors'] ) : 0,
 				)
 				: array( 'status' => 'Not run yet' )
 		);

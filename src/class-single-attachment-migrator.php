@@ -212,10 +212,7 @@ final class Single_Attachment_Migrator {
 			if ( is_array( $new_metadata ) ) {
 				$metadata_was_changed = true;
 				wp_update_attachment_metadata( $attachment_id, $new_metadata );
-
-				if ( wp_get_attachment_metadata( $attachment_id, true ) !== $new_metadata ) {
-					throw new \RuntimeException( 'Could not update attachment metadata.' );
-				}
+				$this->assert_targeted_metadata_state( $attachment_id, $plan['rows'], $plan['proposed_attached_file'], true );
 			}
 
 			$this->repository->set_rows_status( $row_ids, 'migrated', null, true );
@@ -235,8 +232,9 @@ final class Single_Attachment_Migrator {
 			}
 			if ( $metadata_was_changed && is_array( $plan['metadata'] ) ) {
 				wp_update_attachment_metadata( $attachment_id, $plan['metadata'] );
-				if ( wp_get_attachment_metadata( $attachment_id, true ) !== $plan['metadata'] ) {
-					$error_message .= ' Rollback could not restore attachment metadata.';
+				$rollback_errors = $this->validate_metadata_mapping( wp_get_attachment_metadata( $attachment_id, true ), $plan['rows'] );
+				if ( $rollback_errors ) {
+					$error_message .= ' Rollback could not restore migration-critical attachment metadata fields.';
 				}
 			}
 
@@ -387,6 +385,34 @@ final class Single_Attachment_Migrator {
 		}
 
 		return $metadata;
+	}
+
+	/**
+	 * Validate only migration-critical metadata fields after an update.
+	 *
+	 * @param int                            $attachment_id  Attachment ID.
+	 * @param array<int, array<string,mixed>> $rows          Manifest rows.
+	 * @param string                         $attached_file  Expected attached file.
+	 * @param bool                           $expect_migrated Whether migrated targets should be present.
+	 * @return void
+	 */
+	private function assert_targeted_metadata_state( $attachment_id, array $rows, $attached_file, $expect_migrated ) {
+		$current_file = get_post_meta( $attachment_id, '_wp_attached_file', true );
+		if ( $current_file !== $attached_file ) {
+			throw new \RuntimeException( 'Could not update _wp_attached_file.' );
+		}
+
+		$metadata = wp_get_attachment_metadata( $attachment_id, true );
+		if ( ! is_array( $metadata ) ) {
+			return;
+		}
+
+		$errors = $expect_migrated
+			? $this->validate_migrated_metadata( $metadata, $rows )
+			: $this->validate_metadata_mapping( $metadata, $rows );
+		if ( $errors ) {
+			throw new \RuntimeException( implode( ' ', $errors ) );
+		}
 	}
 
 	/**
