@@ -153,7 +153,9 @@ final class Old_URL_Audit_Service {
 		foreach ( $rows as $row ) {
 			foreach ( $this->build_variants( (string) $row['old_url'] ) as $variant ) {
 				$known[ $variant ] = array(
-					'status' => 'migrated' === $row['status'] ? 'migrated' : 'known_non_migrated',
+					'status' => in_array( $row['status'], array( 'migrated', 'adopted_root_size', 'omitted_size_collision' ), true )
+						? 'migrated'
+						: 'known_non_migrated',
 				);
 			}
 		}
