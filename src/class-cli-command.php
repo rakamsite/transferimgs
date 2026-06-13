@@ -747,18 +747,19 @@ final class CLI_Command {
 
 		\WP_CLI::log( 'Latest redirect export summary:' );
 		$this->format_key_value_summary(
-			$redirect_export
-				? array(
-					'generated_at'         => $redirect_readiness['generated_at'] ?? ( $redirect_export['generated_at'] ?? '-' ),
-					'ready'                => ! empty( $redirect_readiness['ready'] ) ? 'yes' : 'no',
-					'latest_apache_file'   => $redirect_export['exports']['apache']['file_name'] ?? '-',
-					'latest_nginx_file'    => $redirect_export['exports']['nginx']['file_name'] ?? '-',
-					'latest_csv_file'      => $redirect_export['exports']['csv']['file_name'] ?? '-',
-					'redirect_rule_count'  => $redirect_readiness['redirect_rules_to_export'] ?? ( $redirect_export['latest_preview']['redirect_rule_count'] ?? 0 ),
-					'export_warnings_count' => isset( $redirect_export['warnings'] ) ? count( $redirect_export['warnings'] ) : 0,
-					'export_errors_count'   => isset( $redirect_export['errors'] ) ? count( $redirect_export['errors'] ) : 0,
-				)
-				: array( 'status' => 'Not run yet' )
+			array(
+				'generated_at'            => $redirect_readiness['generated_at'] ?? ( $redirect_export['generated_at'] ?? '-' ),
+				'preview_status'          => $redirect_readiness['redirect_preview_status']['label'] ?? 'Preview not run yet.',
+				'export_status'           => $redirect_readiness['redirect_export_status']['label'] ?? 'Final redirect export not run yet.',
+				'preview_ready'           => ! empty( $redirect_readiness['redirect_preview_ready'] ) ? 'yes' : 'no',
+				'export_ready'            => ! empty( $redirect_readiness['redirect_export_ready'] ) ? 'yes' : 'no',
+				'latest_apache_file'      => $redirect_export['exports']['apache']['file_name'] ?? '-',
+				'latest_nginx_file'       => $redirect_export['exports']['nginx']['file_name'] ?? '-',
+				'latest_csv_file'         => $redirect_export['exports']['csv']['file_name'] ?? '-',
+				'redirect_rule_count'     => $redirect_readiness['redirect_rules_to_export'] ?? ( $redirect_readiness['redirect_preview_status']['redirect_rule_count'] ?? 0 ),
+				'export_warnings_count'   => isset( $redirect_export['warnings'] ) ? count( $redirect_export['warnings'] ) : 0,
+				'export_errors_count'     => isset( $redirect_export['errors'] ) ? count( $redirect_export['errors'] ) : 0,
+			)
 		);
 
 		\WP_CLI::success( 'Read-only report complete. No files or database records were changed.' );

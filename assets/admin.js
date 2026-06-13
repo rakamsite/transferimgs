@@ -155,8 +155,10 @@
 			var verify = report.verify || {};
 			var audit = report.old_url_audit || {};
 			var redirectExport = report.redirect_export || {};
+			var redirectPreviewStatus = report.redirect_preview_status || {};
+			var redirectExportStatus = report.redirect_export_status || {};
 			var latestExports = redirectExport.exports || {};
-			var latestPreview = redirectExport.latest_preview || {};
+			var latestPreview = redirectExport.preview || redirectExport.latest_preview || {};
 			var extensionCounts = latestPreview.extension_counts || {};
 			var cards = [
 				['Manifest table', report.table_exists ? 'Installed' : 'Missing'],
@@ -184,7 +186,10 @@
 				['Non-migrated URLs', audit.non_migrated_manifest_url_remaining || 0],
 				['Orphan dated URLs', audit.orphan_old_upload_url_remaining || 0],
 				['Dated URL occurrences', audit.generic_dated_upload_occurrences || 0],
-				['Redirect Export Ready', report.redirect_export_ready ? 'Yes' : 'No'],
+				['Redirect preview status', redirectPreviewStatus.label || (redirectPreviewStatus.has_run ? (redirectPreviewStatus.ready ? 'PASS' : 'FAIL') : 'Not run yet')],
+				['Redirect preview ready', report.redirect_preview_ready ? 'Yes' : 'No'],
+				['Final redirect export status', redirectExportStatus.label || (redirectExportStatus.has_run ? (redirectExportStatus.ready ? 'PASS' : 'FAIL') : 'Not run yet')],
+				['Final redirect export ready', report.redirect_export_ready ? 'Yes' : 'No'],
 				['Migrated mappings available', latestPreview.total_migrated_mappings || 0],
 				['Redirect Rules', latestPreview.redirect_rule_count || 0],
 				['Persian / non-ASCII mappings', latestPreview.unicode_filename_count || 0],
@@ -204,10 +209,29 @@
 			document.getElementById('mfm-status-cards').innerHTML = cards.map(function (card) {
 				return '<div class="mfm-card"><strong>' + escapeHtml(String(card[1])) + '</strong><span>' + escapeHtml(card[0]) + '</span></div>';
 			}).join('');
+			document.querySelectorAll('[data-mfm-download-format]').forEach(function (button) {
+				var format = button.getAttribute('data-mfm-download-format');
+				var href = button.getAttribute('data-mfm-download-href') || '#';
+				var latest = latestExports[format] || {};
+				var available = Boolean(latest && latest.file_name);
+				if (available) {
+					button.href = href;
+					button.removeAttribute('aria-disabled');
+					button.classList.remove('disabled');
+					button.style.pointerEvents = '';
+					button.style.opacity = '';
+					return;
+				}
+				button.href = '#';
+				button.setAttribute('aria-disabled', 'true');
+				button.classList.add('disabled');
+				button.style.pointerEvents = 'none';
+				button.style.opacity = '0.5';
+			});
 			clearLockButton.hidden = !report.lock_is_stale;
 			renderVerify(report.verify);
 			renderAudit(report.old_url_audit);
-			renderRedirect(report.redirect_export);
+			renderRedirect(report);
 			if (report.job && report.job.job_type && !running && (!currentJob || !currentJob.dry_run)) {
 				renderJob(report.job);
 			}
@@ -261,30 +285,42 @@
 	}
 
 	function renderRedirect(result) {
-		if (!result || (!result.generated_at && !result.readiness)) {
+		if (!result || (!result.generated_at && !result.readiness && !result.redirect_preview_status && !result.redirect_export_status)) {
 			redirectStatus.className = 'mfm-verify-status';
 			redirectStatus.textContent = 'Not run yet.';
 			redirectResult.textContent = 'No redirect export preview stored.';
 			return;
 		}
 
-		var ready = Boolean(result.ready || (result.readiness && result.readiness.ready));
+		var previewStatus = result.redirect_preview_status || (result.readiness && result.readiness.redirect_preview_status) || {};
+		var exportStatus = result.redirect_export_status || (result.readiness && result.readiness.redirect_export_status) || {};
+		var hasStructuredStatuses = Boolean(result.redirect_preview_status || result.redirect_export_status || (result.readiness && (result.readiness.redirect_preview_status || result.readiness.redirect_export_status)));
+		var ready = Boolean(result.ready || (result.readiness && result.readiness.ready) || result.redirect_export_ready);
 		var ruleCount = result.redirect_rule_count ||
 			result.export_rule_count ||
 			(result.latest_preview ? result.latest_preview.redirect_rule_count : 0) ||
 			(result.readiness ? result.readiness.redirect_rules_to_export : 0) ||
+			(previewStatus.redirect_rule_count || 0) ||
 			0;
-		var warnings = (result.warnings || []).length;
-		var errors = (result.errors || []).length;
-		redirectStatus.className = 'mfm-verify-status ' + (ready && !errors ? 'mfm-pass' : 'mfm-fail');
-		redirectStatus.textContent = (ready && !errors ? 'READY' : 'NOT READY') + ' | rules ' + ruleCount +
-			' | warnings ' + warnings + ' | errors ' + errors;
+		var warnings = (result.warnings || previewStatus.warnings || exportStatus.warnings || []).length;
+		var errors = (result.errors || previewStatus.errors || exportStatus.errors || []).length;
+		if (hasStructuredStatuses) {
+			var previewLabel = previewStatus.label || (previewStatus.has_run ? (previewStatus.ready ? 'Preview passed.' : 'Preview failed.') : 'Preview not run yet.');
+			var exportLabel = exportStatus.label || (exportStatus.has_run ? (exportStatus.ready ? 'Final redirect export passed.' : 'Final redirect export failed.') : 'Final redirect export not run yet.');
+			redirectStatus.className = 'mfm-verify-status ' + ((ready && !errors) ? 'mfm-pass' : 'mfm-fail');
+			redirectStatus.textContent = 'Preview: ' + previewLabel + ' | Export: ' + exportLabel +
+				' | rules ' + ruleCount + ' | warnings ' + warnings + ' | errors ' + errors;
+		} else {
+			redirectStatus.className = 'mfm-verify-status ' + (ready && !errors ? 'mfm-pass' : 'mfm-fail');
+			redirectStatus.textContent = (ready && !errors ? 'READY' : 'NOT READY') + ' | rules ' + ruleCount +
+				' | warnings ' + warnings + ' | errors ' + errors;
+		}
 		redirectResult.textContent = JSON.stringify(result, null, 2);
 	}
 
 	function refreshRedirect() {
 		request('media_flatten_get_report').then(function (report) {
-			renderRedirect(report.redirect_export || {});
+			renderRedirect(report);
 		}).catch(function (error) {
 			showNotice(error.message, 'error');
 		});
@@ -294,9 +330,9 @@
 		var action = preview ? 'media_flatten_preview_redirects' : 'media_flatten_generate_redirect_export';
 		var data = preview ? {} : { format: format };
 		request(action, data).then(function (response) {
-			var result = response.result || {};
+			var result = response.readiness || response.result || {};
 			var ready = Boolean(result.ready || (result.readiness && result.readiness.ready));
-			renderRedirect(response.result || {});
+			renderRedirect(result);
 			showNotice(preview ? 'Redirect preview complete.' : 'Redirect export generated.', ready ? 'success' : 'warning');
 			refreshReport();
 		}).catch(function (error) {
