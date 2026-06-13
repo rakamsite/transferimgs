@@ -658,6 +658,164 @@ final class CLI_Command {
 	}
 
 	/**
+	 * Remove only empty old year/month upload directories after migration is complete.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--batch=<count>]
+	 * : Maximum directories to process per batch. Default: 20. Maximum: 100.
+	 *
+	 * [--dry-run]
+	 * : Show cleanup candidates without deleting directories or changing the database.
+	 *
+	 * [--yes]
+	 * : Required for actual cleanup.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp media-flatten cleanup-empty-dirs --dry-run
+	 *     wp media-flatten cleanup-empty-dirs --batch=20 --yes
+	 *
+	 * @param array<int, string>   $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Named arguments.
+	 * @return void
+	 */
+	public function cleanup_empty_dirs( $args, $assoc_args ) {
+		$batch_size = (int) \WP_CLI\Utils\get_flag_value( $assoc_args, 'batch', 20 );
+		$dry_run    = isset( $assoc_args['dry-run'] );
+		$yes        = isset( $assoc_args['yes'] );
+
+		if ( $batch_size < 1 ) {
+			\WP_CLI::error( 'Batch size must be a positive integer.' );
+		}
+		if ( $batch_size > 100 ) {
+			\WP_CLI::error( 'Batch size must not exceed 100.' );
+		}
+		if ( ! $dry_run && ! $yes ) {
+			\WP_CLI::error( 'Actual cleanup requires --yes. Use --dry-run first to review the candidate directories.' );
+		}
+
+		try {
+			$repository = new Manifest_Repository();
+			if ( ! $repository->table_exists() ) {
+				\WP_CLI::error( 'Manifest table is not installed. Run: wp media-flatten install' );
+			}
+
+			$service   = new Empty_Directory_Cleanup_Service( $repository );
+			$readiness = $service->readiness();
+
+			if ( empty( $readiness['ready'] ) ) {
+				\WP_CLI::warning( 'Cleanup readiness has not fully passed. Review the reported blockers before deleting directories.' );
+				$this->format_key_value_summary(
+					array(
+						'ready'                      => ! empty( $readiness['ready'] ) ? 'yes' : 'no',
+						'cleanup_ready'              => ! empty( $readiness['cleanup_ready'] ) ? 'yes' : 'no',
+						'remaining_old_directories'  => $readiness['remaining_old_directories'] ?? 0,
+						'empty_month_dirs_found'     => $readiness['empty_month_dirs_found'] ?? 0,
+						'empty_year_dirs_found'      => $readiness['empty_year_dirs_found'] ?? 0,
+						'removed_count'              => $readiness['removed_count'] ?? 0,
+						'skipped_not_empty_count'    => $readiness['skipped_not_empty_count'] ?? 0,
+						'skipped_unsafe_count'       => $readiness['skipped_unsafe_count'] ?? 0,
+						'failed_count'               => $readiness['failed_count'] ?? 0,
+					)
+				);
+				foreach ( $readiness['warnings'] ?? array() as $message ) {
+					\WP_CLI::warning( $message );
+				}
+				if ( ! $dry_run ) {
+					\WP_CLI::error( 'Cleanup readiness failed. Use --dry-run to review the candidate directories only.' );
+				}
+			}
+
+			if ( $dry_run ) {
+				$result = $service->report( $batch_size, false );
+				$this->format_key_value_summary(
+					array(
+						'ready'                      => ! empty( $result['ready'] ) ? 'yes' : 'no',
+						'remaining_old_directories'  => $result['remaining_count'] ?? 0,
+						'empty_month_dirs_found'     => $result['empty_month_dirs_found'] ?? 0,
+						'empty_year_dirs_found'      => $result['empty_year_dirs_found'] ?? 0,
+						'removed_count'              => $result['removed_count'] ?? 0,
+						'skipped_not_empty_count'    => $result['skipped_not_empty_count'] ?? 0,
+						'skipped_unsafe_count'       => $result['skipped_unsafe_count'] ?? 0,
+						'already_missing_count'      => $result['already_missing_count'] ?? 0,
+						'failed_count'               => $result['failed_count'] ?? 0,
+					)
+				);
+				$this->format_items(
+					$result['samples']['eligible'] ?? array(),
+					array( 'path', 'relative_path', 'kind', 'result', 'message' )
+				);
+				$this->format_items(
+					$result['samples']['not_empty'] ?? array(),
+					array( 'path', 'relative_path', 'kind', 'result', 'message' )
+				);
+				$this->format_items(
+					$result['samples']['unsafe'] ?? array(),
+					array( 'path', 'relative_path', 'kind', 'result', 'message' )
+				);
+				if ( ! empty( $result['errors'] ) ) {
+					\WP_CLI::log( 'Cleanup errors:' );
+					foreach ( $result['errors'] as $message ) {
+						\WP_CLI::warning( $message );
+					}
+				}
+				\WP_CLI::success( 'Read-only empty-directory cleanup preview complete. No directories or database records were changed.' );
+				return;
+			}
+
+			$cursor  = '';
+			$summary = $service->initial_result();
+			do {
+				$batch_result = $service->run_batch( $cursor, $batch_size, $summary, false );
+				$summary      = $batch_result['result'];
+				$cursor       = $batch_result['last_path'];
+				$this->format_key_value_summary(
+					array(
+						'processed'               => $batch_result['summary']['processed'] ?? 0,
+						'eligible'                => $batch_result['summary']['eligible'] ?? 0,
+						'removed'                 => $batch_result['summary']['removed'] ?? 0,
+						'skipped_not_empty'       => $batch_result['summary']['skipped_not_empty'] ?? 0,
+						'skipped_unsafe'          => $batch_result['summary']['skipped_unsafe'] ?? 0,
+						'already_missing'         => $batch_result['summary']['already_missing'] ?? 0,
+						'failed'                  => $batch_result['summary']['failed'] ?? 0,
+						'last_path'               => $batch_result['summary']['last_path'] ?? $cursor,
+					)
+				);
+			} while ( ! $batch_result['done'] );
+
+			$summary = $service->finalize( $summary, false );
+			$service->store_state( $summary );
+
+			$this->format_key_value_summary(
+				array(
+					'pass'                    => ! empty( $summary['pass'] ) ? 'yes' : 'no',
+					'ready'                   => ! empty( $summary['ready'] ) ? 'yes' : 'no',
+					'remaining_old_directories' => $summary['remaining_count'] ?? 0,
+					'empty_month_dirs_found'   => $summary['empty_month_dirs_found'] ?? 0,
+					'empty_year_dirs_found'    => $summary['empty_year_dirs_found'] ?? 0,
+					'removed_count'            => $summary['removed_count'] ?? 0,
+					'skipped_not_empty_count'  => $summary['skipped_not_empty_count'] ?? 0,
+					'skipped_unsafe_count'     => $summary['skipped_unsafe_count'] ?? 0,
+					'already_missing_count'    => $summary['already_missing_count'] ?? 0,
+					'failed_count'             => $summary['failed_count'] ?? 0,
+				)
+			);
+
+			if ( ! empty( $summary['errors'] ) ) {
+				\WP_CLI::log( 'Cleanup errors:' );
+				foreach ( $summary['errors'] as $message ) {
+					\WP_CLI::warning( $message );
+				}
+			}
+
+			\WP_CLI::success( 'Empty-directory cleanup complete.' );
+		} catch ( \RuntimeException $exception ) {
+			\WP_CLI::error( $exception->getMessage() );
+		}
+	}
+
+	/**
 	 * Run the pre-redirect old dated upload URL audit.
 	 *
 	 * ## OPTIONS
@@ -922,7 +1080,12 @@ final class CLI_Command {
 					'status'                 => ! empty( $delete_result['ready'] ) ? 'READY' : 'NOT READY',
 					'generated_at'           => $delete_result['generated_at'] ?? '-',
 					'completed_at'           => $delete_result['completed_at'] ?? '-',
+					'dry_run_status'         => $delete_readiness['dry_run_status'] ?? ( $delete_result['dry_run_status'] ?? 'not_run' ),
+					'dry_run_completed_at'   => $delete_readiness['dry_run_completed_at'] ?? ( $delete_result['dry_run_completed_at'] ?? '-' ),
 					'delete_old_files_ready' => ! empty( $delete_readiness['delete_old_files_ready'] ) ? 'yes' : 'no',
+					'final_redirect_export_has_run' => ! empty( $delete_readiness['final_redirect_export_has_run'] ) ? 'yes' : 'no',
+					'final_redirect_export_format'  => $delete_readiness['final_redirect_export_format'] ?? '-',
+					'final_redirect_export_file'    => $delete_readiness['final_redirect_export_file'] ?? '-',
 					'eligible_count'         => $delete_result['eligible_count'] ?? 0,
 					'deleted_count'          => $delete_result['deleted_count'] ?? 0,
 					'already_missing_count'  => $delete_result['already_missing_count'] ?? 0,
@@ -930,6 +1093,65 @@ final class CLI_Command {
 					'bytes_eligible'         => $delete_result['bytes_eligible'] ?? 0,
 					'bytes_freed'            => $delete_result['bytes_freed'] ?? 0,
 					'latest_errors_count'    => isset( $delete_result['errors'] ) && is_array( $delete_result['errors'] ) ? count( $delete_result['errors'] ) : 0,
+				)
+				: array( 'status' => 'Not run yet' )
+		);
+
+		$cleanup_result = get_option( Admin_Controller::CLEANUP_RESULT_OPTION, array() );
+		$final_report   = get_option( Admin_Controller::FINAL_REPORT_OPTION, array() );
+		$cleanup_service = new Empty_Directory_Cleanup_Service( $repository );
+		$cleanup_readiness = $cleanup_service->readiness();
+
+		\WP_CLI::log( 'Latest cleanup summary:' );
+		$this->format_key_value_summary(
+			$cleanup_result
+				? array(
+					'status'                    => ! empty( $cleanup_result['ready'] ) ? 'READY' : 'NOT READY',
+					'generated_at'              => $cleanup_result['generated_at'] ?? '-',
+					'completed_at'              => $cleanup_result['completed_at'] ?? '-',
+					'dry_run_status'            => $cleanup_readiness['dry_run_status'] ?? ( $cleanup_result['dry_run_status'] ?? 'not_run' ),
+					'dry_run_completed_at'      => $cleanup_readiness['dry_run_completed_at'] ?? ( $cleanup_result['dry_run_completed_at'] ?? '-' ),
+					'cleanup_ready'             => ! empty( $cleanup_readiness['cleanup_ready'] ) ? 'yes' : 'no',
+					'remaining_old_directories' => $cleanup_result['remaining_count'] ?? 0,
+					'empty_month_dirs_found'    => $cleanup_result['empty_month_dirs_found'] ?? 0,
+					'empty_year_dirs_found'     => $cleanup_result['empty_year_dirs_found'] ?? 0,
+					'removed_count'             => $cleanup_result['removed_count'] ?? 0,
+					'skipped_not_empty_count'   => $cleanup_result['skipped_not_empty_count'] ?? 0,
+					'skipped_unsafe_count'      => $cleanup_result['skipped_unsafe_count'] ?? 0,
+					'failed_count'              => $cleanup_result['failed_count'] ?? 0,
+					'warning_count'             => $cleanup_result['warning_count'] ?? 0,
+					'last_cleanup_at'           => $cleanup_result['last_cleanup_at'] ?? '-',
+				)
+				: array( 'status' => 'Not run yet' )
+		);
+
+		$final_service = new Final_Migration_Report_Service( $repository );
+		$final_state   = $final_report ? $final_report : $final_service->state();
+		\WP_CLI::log( 'Final migration report:' );
+		$this->format_key_value_summary(
+			$final_state
+				? array(
+					'status'                          => $final_state['status'] ?? ( ! empty( $final_state['pass'] ) ? 'PASS' : 'NOT READY' ),
+					'generated_at'                    => $final_state['generated_at'] ?? '-',
+					'verified_at'                     => $final_state['verified_at'] ?? '-',
+					'audited_at'                      => $final_state['audited_at'] ?? '-',
+					'redirect_export_at'              => $final_state['redirect_export_at'] ?? '-',
+					'last_old_file_deletion_at'       => $final_state['last_old_file_deletion_at'] ?? '-',
+					'last_cleanup_at'                 => $final_state['last_cleanup_at'] ?? '-',
+					'total_manifest_rows'             => $final_state['total_manifest_rows'] ?? 0,
+					'total_migrated_rows'             => $final_state['total_migrated_rows'] ?? 0,
+					'missing_rows'                    => $final_state['missing_rows'] ?? 0,
+					'blocked_collision_rows'          => $final_state['blocked_collision_rows'] ?? 0,
+					'failed_rows'                     => $final_state['failed_rows'] ?? 0,
+					'deleted_old_files'               => $final_state['deleted_old_files'] ?? 0,
+					'old_files_remaining'             => $final_state['old_files_remaining'] ?? 0,
+					'old_file_deletion_failures'      => $final_state['old_file_deletion_failures'] ?? 0,
+					'empty_directories_removed'       => $final_state['empty_directories_removed'] ?? 0,
+					'old_yyyy_mm_directories_remaining' => $final_state['old_yyyy_mm_directories_remaining'] ?? 0,
+					'unsafe_directories_remaining'    => $final_state['unsafe_directories_remaining'] ?? 0,
+					'cleanup_failures'                => $final_state['cleanup_failures'] ?? 0,
+					'remaining_old_url_occurrences'   => $final_state['remaining_old_url_occurrences'] ?? 0,
+					'pass'                            => ! empty( $final_state['pass'] ) ? 'yes' : 'no',
 				)
 				: array( 'status' => 'Not run yet' )
 		);

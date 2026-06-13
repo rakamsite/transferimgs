@@ -11,6 +11,8 @@ final class Admin_Controller {
 	const OLD_URL_AUDIT_RESULT_OPTION = 'media_flatten_last_old_url_audit_result';
 	const REDIRECT_EXPORT_RESULT_OPTION = 'media_flatten_last_redirect_export_result';
 	const DELETE_RESULT_OPTION = 'media_flatten_last_delete_result';
+	const CLEANUP_RESULT_OPTION = 'media_flatten_cleanup_state';
+	const FINAL_REPORT_OPTION = 'media_flatten_last_final_report_result';
 	const STALE_SECONDS   = 900;
 	const LOG_LIMIT       = 60;
 
@@ -23,6 +25,7 @@ final class Admin_Controller {
 		'verify'       => 100,
 		'old_url_audit' => 100,
 		'delete_old_files' => 10,
+		'cleanup_empty_dirs' => 20,
 	);
 
 	/** @var array<string, int> */
@@ -34,6 +37,7 @@ final class Admin_Controller {
 		'verify'       => 500,
 		'old_url_audit' => 500,
 		'delete_old_files' => 50,
+		'cleanup_empty_dirs' => 100,
 	);
 
 	/**
@@ -61,6 +65,11 @@ final class Admin_Controller {
 		add_action( 'wp_ajax_media_flatten_delete_old_files_dry_run', array( $this, 'ajax_delete_old_files_dry_run' ) );
 		add_action( 'wp_ajax_media_flatten_delete_old_files_batch', array( $this, 'ajax_delete_old_files_batch' ) );
 		add_action( 'wp_ajax_media_flatten_get_delete_report', array( $this, 'ajax_get_delete_report' ) );
+		add_action( 'wp_ajax_media_flatten_start_cleanup_empty_dirs', array( $this, 'ajax_start_cleanup_empty_dirs' ) );
+		add_action( 'wp_ajax_media_flatten_cleanup_empty_dirs_dry_run', array( $this, 'ajax_cleanup_empty_dirs_dry_run' ) );
+		add_action( 'wp_ajax_media_flatten_cleanup_empty_dirs_batch', array( $this, 'ajax_cleanup_empty_dirs_batch' ) );
+		add_action( 'wp_ajax_media_flatten_get_cleanup_report', array( $this, 'ajax_get_cleanup_report' ) );
+		add_action( 'wp_ajax_media_flatten_get_final_report', array( $this, 'ajax_get_final_report' ) );
 		add_action( 'admin_post_media_flatten_download_redirect_export', array( $this, 'admin_post_download_redirect_export' ) );
 	}
 
@@ -88,13 +97,13 @@ final class Admin_Controller {
 			'media-flatten-admin',
 			plugins_url( '../assets/admin.css', __FILE__ ),
 			array(),
-			'1.1.0'
+			'1.2.0'
 		);
 		wp_enqueue_script(
 			'media-flatten-admin',
 			plugins_url( '../assets/admin.js', __FILE__ ),
 			array(),
-			'1.1.0',
+			'1.2.0',
 			true
 		);
 		wp_localize_script(
@@ -213,6 +222,41 @@ final class Admin_Controller {
 			</section>
 
 			<section class="mfm-panel">
+				<h2>Cleanup Empty Directories</h2>
+				<p>Remove only empty old year/month upload directories after file deletion has finished. No files are ever deleted here.</p>
+				<label style="display:block;">
+					<input type="checkbox" id="mfm-cleanup-confirm-check">
+					I understand this will remove empty old upload directories only.
+				</label>
+				<label style="display:block;margin-top:8px;">
+					Type CLEANUP EMPTY DIRECTORIES to confirm
+					<input type="text" id="mfm-cleanup-confirm-phrase" autocomplete="off" spellcheck="false">
+				</label>
+				<label>
+					Batch size
+					<input type="number" min="1" max="<?php echo esc_attr( $this->maximums['cleanup_empty_dirs'] ); ?>"
+						value="<?php echo esc_attr( $this->defaults['cleanup_empty_dirs'] ); ?>" data-mfm-batch="cleanup_empty_dirs">
+				</label>
+				<p>
+					<button class="button button-primary" data-mfm-action="cleanup_empty_dirs_dry_run">Dry Run Cleanup Empty Directories</button>
+					<button class="button button-primary" data-mfm-action="cleanup_empty_dirs" id="mfm-cleanup-run">Cleanup Empty Directories Batch</button>
+					<button class="button" id="mfm-refresh-cleanup">Refresh Cleanup Report</button>
+				</p>
+				<div id="mfm-cleanup-status" class="mfm-verify-status">Not run yet.</div>
+				<pre id="mfm-cleanup-result">No cleanup report stored.</pre>
+			</section>
+
+			<section class="mfm-panel">
+				<h2>Final Migration Report</h2>
+				<p>Read-only final status for the migration, cleanup, and redirect/export safety gates.</p>
+				<p>
+					<button class="button button-primary" id="mfm-refresh-final">Refresh Final Migration Report</button>
+				</p>
+				<div id="mfm-final-status" class="mfm-verify-status">Not run yet.</div>
+				<pre id="mfm-final-result">No final migration report stored.</pre>
+			</section>
+
+			<section class="mfm-panel">
 				<h2>Current Job</h2>
 				<div class="mfm-progress"><span id="mfm-progress-bar"></span></div>
 				<p id="mfm-progress-text">No job running.</p>
@@ -276,15 +320,21 @@ final class Admin_Controller {
 				$audit = get_option( self::OLD_URL_AUDIT_RESULT_OPTION, array() );
 				$redirect_export = get_option( self::REDIRECT_EXPORT_RESULT_OPTION, array() );
 				$delete_result = get_option( self::DELETE_RESULT_OPTION, array() );
+				$cleanup_result = get_option( self::CLEANUP_RESULT_OPTION, array() );
+				$final_report   = get_option( self::FINAL_REPORT_OPTION, array() );
 				$redirect_service = null;
 				$redirect_readiness = array();
 				$delete_service = null;
 				$delete_readiness = array();
+				$cleanup_service = null;
+				$cleanup_readiness = array();
 				if ( $repository->table_exists() ) {
 					$redirect_service   = new Redirect_Export_Service( $repository );
 					$redirect_readiness = $redirect_service->readiness();
 					$delete_service     = new Old_File_Deletion_Service( $repository );
 					$delete_readiness   = $delete_service->readiness();
+					$cleanup_service     = new Empty_Directory_Cleanup_Service( $repository );
+					$cleanup_readiness   = $cleanup_service->readiness();
 				}
 
 				return array(
@@ -306,6 +356,10 @@ final class Admin_Controller {
 					'delete_old_files'        => $delete_result,
 					'delete_old_files_ready'  => ! empty( $delete_readiness['delete_old_files_ready'] ),
 					'delete_readiness'        => $delete_readiness,
+					'cleanup_result'          => $cleanup_result,
+					'cleanup_ready'           => ! empty( $cleanup_readiness['cleanup_ready'] ),
+					'cleanup_readiness'       => $cleanup_readiness,
+					'final_report'            => $final_report,
 				);
 			}
 		);
@@ -371,8 +425,53 @@ final class Admin_Controller {
 			function () {
 				$service = $this->delete_old_files_service();
 				return array(
-					'result'    => $service->report( 100, true ),
+					'result'    => $service->state(),
 					'readiness' => $service->readiness(),
+				);
+			}
+		);
+	}
+
+	/** @return void */
+	public function ajax_start_cleanup_empty_dirs() {
+		$_POST['job_type'] = 'cleanup_empty_dirs';
+		$this->ajax_start_job();
+	}
+
+	/** @return void */
+	public function ajax_cleanup_empty_dirs_dry_run() {
+		$_POST['job_type'] = 'cleanup_empty_dirs_dry_run';
+		$this->ajax_start_job();
+	}
+
+	/** @return void */
+	public function ajax_cleanup_empty_dirs_batch() {
+		$_POST['required_job_type'] = 'cleanup_empty_dirs';
+		$this->ajax_run_batch();
+	}
+
+	/** @return void */
+	public function ajax_get_cleanup_report() {
+		$this->ajax_guard(
+			function () {
+				$service = $this->cleanup_empty_dirs_service();
+				return array(
+					'result'    => $service->state(),
+					'readiness' => $service->readiness(),
+				);
+			}
+		);
+	}
+
+	/** @return void */
+	public function ajax_get_final_report() {
+		$this->ajax_guard(
+			function () {
+				$service = $this->final_migration_report_service();
+				$result  = $service->run( 20, true );
+				return array(
+					'result' => $result,
+					'state'  => $service->state(),
 				);
 			}
 		);
@@ -500,6 +599,12 @@ final class Admin_Controller {
 						throw new \RuntimeException( 'Old-file deletion requires the backup checkbox and the exact confirmation phrase DELETE OLD FILES.' );
 					}
 				}
+				if ( 'cleanup_empty_dirs' === $base_type && ! $dry_run ) {
+					$confirmed = ! empty( $_POST['cleanup_confirm_checked'] ) && 'CLEANUP EMPTY DIRECTORIES' === trim( (string) ( $_POST['cleanup_confirm_phrase'] ?? '' ) );
+					if ( ! $confirmed ) {
+						throw new \RuntimeException( 'Empty-directory cleanup requires the checkbox and the exact confirmation phrase CLEANUP EMPTY DIRECTORIES.' );
+					}
+				}
 
 				$job = $this->new_job( $type, $base_type, $batch_size, $dry_run );
 				if ( ! $dry_run ) {
@@ -533,8 +638,15 @@ final class Admin_Controller {
 					throw new \RuntimeException( 'There is no running job to process.' );
 				}
 				$required_job_type = sanitize_key( wp_unslash( $_POST['required_job_type'] ?? '' ) );
-				if ( $required_job_type && $required_job_type !== ( $job['job_type'] ?? '' ) ) {
-					throw new \RuntimeException( 'The requested batch endpoint does not match the current job.' );
+				if ( $required_job_type ) {
+					$current_job_type = (string) ( $job['job_type'] ?? '' );
+					$delete_batch_ok  = 'delete_old_files' === $required_job_type
+						&& in_array( $current_job_type, array( 'delete_old_files', 'delete_old_files_dry_run' ), true );
+					$cleanup_batch_ok = 'cleanup_empty_dirs' === $required_job_type
+						&& in_array( $current_job_type, array( 'cleanup_empty_dirs', 'cleanup_empty_dirs_dry_run' ), true );
+					if ( ! $delete_batch_ok && ! $cleanup_batch_ok && $required_job_type !== $current_job_type ) {
+						throw new \RuntimeException( 'The requested batch endpoint does not match the current job.' );
+					}
 				}
 
 				$locked = false;
@@ -657,6 +769,30 @@ final class Admin_Controller {
 	}
 
 	/**
+	 * @return Empty_Directory_Cleanup_Service
+	 */
+	private function cleanup_empty_dirs_service() {
+		$repository = new Manifest_Repository();
+		if ( ! $repository->table_exists() ) {
+			throw new \RuntimeException( 'The manifest table is not installed. Run Install / Check Manifest Table first.' );
+		}
+
+		return new Empty_Directory_Cleanup_Service( $repository );
+	}
+
+	/**
+	 * @return Final_Migration_Report_Service
+	 */
+	private function final_migration_report_service() {
+		$repository = new Manifest_Repository();
+		if ( ! $repository->table_exists() ) {
+			throw new \RuntimeException( 'The manifest table is not installed. Run Install / Check Manifest Table first.' );
+		}
+
+		return new Final_Migration_Report_Service( $repository );
+	}
+
+	/**
 	 * @param string $format Redirect export format.
 	 * @return string
 	 */
@@ -698,6 +834,8 @@ final class Admin_Controller {
 			$total = ( new Old_URL_Audit_Service( $repository ) )->estimate_total();
 		} elseif ( 'delete_old_files' === $base_type ) {
 			$total = ( new Old_File_Deletion_Service( $repository ) )->estimate_total();
+		} elseif ( 'cleanup_empty_dirs' === $base_type ) {
+			$total = ( new Empty_Directory_Cleanup_Service( $repository ) )->estimate_total();
 		}
 
 		$job = array(
@@ -708,6 +846,7 @@ final class Admin_Controller {
 			'started_at'        => current_time( 'mysql' ),
 			'heartbeat_unix'    => time(),
 			'last_processed_id' => 0,
+			'last_processed_path' => '',
 			'area_index'        => 0,
 			'total_estimated'   => $total,
 			'processed_items'   => 0,
@@ -725,13 +864,19 @@ final class Admin_Controller {
 		}
 		if ( 'delete_old_files' === $base_type ) {
 			$delete_service = new Old_File_Deletion_Service( $repository );
-			if ( ! $dry_run ) {
-				$report = $delete_service->report( 100, true );
-				if ( empty( $report['ready'] ) ) {
-					throw new \RuntimeException( 'Old-file deletion is not ready yet. Review verification, old URL audit, redirect export, and deletion report results before proceeding.' );
-				}
+			$readiness = $delete_service->readiness();
+			if ( ! $dry_run && ( empty( $readiness['ready'] ) || empty( $readiness['dry_run_pass'] ) ) ) {
+				throw new \RuntimeException( 'Old-file deletion is not ready yet. Run and pass Dry Run Delete Old Files after the latest verify, audit, and redirect export results before proceeding.' );
 			}
 			$job['delete_old_files_result'] = $delete_service->initial_result();
+		}
+		if ( 'cleanup_empty_dirs' === $base_type ) {
+			$cleanup_service = new Empty_Directory_Cleanup_Service( $repository );
+			$readiness       = $cleanup_service->readiness();
+			if ( ! $dry_run && empty( $readiness['ready'] ) ) {
+				throw new \RuntimeException( 'Empty-directory cleanup is not ready yet. Finish file deletion, verification, audit, and redirect export before proceeding.' );
+			}
+			$job['cleanup_empty_dirs_result'] = $cleanup_service->initial_result();
 		}
 
 		return $job;
@@ -890,11 +1035,54 @@ final class Admin_Controller {
 			$latest                         = array( 'summary' => $result['summary'], 'result' => $result['result'] );
 			if ( $done ) {
 				$job['delete_old_files_result'] = $delete_service->finalize( $job['delete_old_files_result'], $dry_run );
+				if ( $dry_run ) {
+					$job['delete_old_files_result']['dry_run_pass']        = ! empty( $job['delete_old_files_result']['pass'] );
+					$job['delete_old_files_result']['dry_run_completed_at'] = current_time( 'mysql' );
+					$job['delete_old_files_result']['dry_run_status']      = $job['delete_old_files_result']['dry_run_pass'] ? 'pass' : 'fail';
+				}
 				$latest['result']               = $job['delete_old_files_result'];
 			}
 			if ( ! $dry_run ) {
-				$delete_service->store_state( $job['delete_old_files_result'] );
+				$stored_delete_state = $delete_service->state();
+				foreach ( array( 'dry_run_pass', 'dry_run_completed_at', 'dry_run_status' ) as $field ) {
+					if ( array_key_exists( $field, $stored_delete_state ) ) {
+						$job['delete_old_files_result'][ $field ] = $stored_delete_state[ $field ];
+					}
+				}
 			}
+			$delete_service->store_state( $job['delete_old_files_result'] );
+		} elseif ( 'cleanup_empty_dirs' === $job['base_type'] ) {
+			$cleanup_service = new Empty_Directory_Cleanup_Service( $repository );
+			$cleanup_cursor  = (string) ( $job['last_processed_path'] ?? '' );
+			$result          = $cleanup_service->run_batch( $cleanup_cursor, $batch, $job['cleanup_empty_dirs_result'], $dry_run );
+			$job['cleanup_empty_dirs_result'] = $result['result'];
+			$job['processed_items']          += $result['summary']['processed'];
+			$job['last_processed_path']       = $result['last_path'];
+			$job['success_count']            += $dry_run ? $result['summary']['eligible'] : $result['summary']['removed'];
+			$job['skipped_count']            += $result['summary']['skipped_not_empty']
+				+ $result['summary']['skipped_unsafe']
+				+ $result['summary']['already_missing'];
+			$job['failed_count']             += $result['summary']['failed'];
+			$done                             = $result['done'];
+			$latest                           = array( 'summary' => $result['summary'], 'result' => $result['result'] );
+			if ( $done ) {
+				$job['cleanup_empty_dirs_result'] = $cleanup_service->finalize( $job['cleanup_empty_dirs_result'], $dry_run );
+				if ( $dry_run ) {
+					$job['cleanup_empty_dirs_result']['dry_run_pass']         = ! empty( $job['cleanup_empty_dirs_result']['pass'] );
+					$job['cleanup_empty_dirs_result']['dry_run_completed_at'] = current_time( 'mysql' );
+					$job['cleanup_empty_dirs_result']['dry_run_status']       = $job['cleanup_empty_dirs_result']['dry_run_pass'] ? 'pass' : 'fail';
+				}
+				$latest['result'] = $job['cleanup_empty_dirs_result'];
+			}
+			if ( ! $dry_run ) {
+				$stored_cleanup_state = $cleanup_service->state();
+				foreach ( array( 'dry_run_pass', 'dry_run_completed_at', 'dry_run_status' ) as $field ) {
+					if ( array_key_exists( $field, $stored_cleanup_state ) ) {
+						$job['cleanup_empty_dirs_result'][ $field ] = $stored_cleanup_state[ $field ];
+					}
+				}
+			}
+			$cleanup_service->store_state( $job['cleanup_empty_dirs_result'] );
 		}
 
 		$job['heartbeat_unix'] = time();

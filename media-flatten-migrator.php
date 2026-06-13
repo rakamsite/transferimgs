@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Media Flatten Migrator
  * Description: Safely assess and migrate dated uploads into the uploads root.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Media Flatten Migrator
  * License: GPL-2.0-or-later
  */
@@ -24,6 +24,8 @@ require_once __DIR__ . '/src/class-old-url-audit-service.php';
 require_once __DIR__ . '/src/class-verification-service.php';
 require_once __DIR__ . '/src/class-redirect-export-service.php';
 require_once __DIR__ . '/src/class-old-file-deletion-service.php';
+require_once __DIR__ . '/src/class-empty-directory-cleanup-service.php';
+require_once __DIR__ . '/src/class-final-migration-report-service.php';
 require_once __DIR__ . '/src/class-cli-command.php';
 require_once __DIR__ . '/src/class-admin-controller.php';
 require_once __DIR__ . '/src/class-plugin.php';

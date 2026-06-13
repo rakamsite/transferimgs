@@ -53,12 +53,23 @@ final class Old_File_Deletion_Service {
 			$status_counts[ $row['status'] ] = (int) $row['item_count'];
 		}
 
-		$duplicate_groups = $this->repository->get_duplicate_logical_groups();
-		$delete_ready = ! empty( $verify['pass'] )
+		$duplicate_groups    = $this->repository->get_duplicate_logical_groups();
+		$dry_run_pass        = ! empty( $state['dry_run_pass'] );
+		$dry_run_completed_at = $state['dry_run_completed_at'] ?? null;
+		$dry_run_time        = $this->timestamp_value( $dry_run_completed_at );
+		$verify_time         = $this->timestamp_value( $verify['verified_at'] ?? null );
+		$audit_time          = $this->timestamp_value( $audit['audited_at'] ?? null );
+		$export_time         = $this->timestamp_value( $redirect['redirect_export_status']['generated_at'] ?? ( $redirect['generated_at'] ?? null ) );
+		$latest_required_time = max( $verify_time, $audit_time, $export_time );
+		$state_is_current    = $dry_run_time > 0 && ( 0 === $latest_required_time || $dry_run_time >= $latest_required_time );
+		$delete_ready = $dry_run_pass
+			&& $state_is_current
+			&& ! empty( $verify['pass'] )
 			&& ! empty( $verify['pre_redirect_ready'] )
 			&& ! empty( $verify['redirect_export_ready'] )
 			&& ! empty( $audit['safe'] )
-			&& ! empty( $redirect['ready'] )
+			&& ! empty( $redirect['redirect_export_has_run'] )
+			&& ! empty( $redirect['redirect_export_ready'] )
 			&& 0 === (int) $this->repository->count_invalid_migrated_url_rows()
 			&& empty( $status_counts['copying'] )
 			&& empty( $status_counts['copied'] )
@@ -74,6 +85,12 @@ final class Old_File_Deletion_Service {
 			'redirect_readiness'         => $redirect,
 			'status_counts'              => $status_counts,
 			'duplicate_manifest_rows'    => count( $duplicate_groups ),
+			'dry_run_pass'               => $dry_run_pass,
+			'dry_run_completed_at'       => $dry_run_completed_at,
+			'dry_run_status'             => ! $dry_run_completed_at ? 'not_run' : ( $dry_run_pass ? 'pass' : 'fail' ),
+			'final_redirect_export_has_run' => ! empty( $redirect['redirect_export_has_run'] ),
+			'final_redirect_export_format'   => $this->latest_export_format( $redirect ),
+			'final_redirect_export_file'     => $this->latest_export_file( $redirect ),
 			'eligible_count'             => $this->repository->count_deletion_candidates(),
 			'deleted_count'              => $this->repository->count_deleted_old_files(),
 			'already_missing_count'      => $this->repository->count_already_missing_old_files(),
@@ -108,14 +125,17 @@ final class Old_File_Deletion_Service {
 		} while ( ! $batch['done'] );
 
 		$result = $this->finalize( $result, true );
+		$result['dry_run_pass']         = ! empty( $result['pass'] );
+		$result['dry_run_completed_at']  = current_time( 'mysql' );
+		$result['dry_run_status']        = $result['dry_run_pass'] ? 'pass' : 'fail';
 		$gate   = $this->readiness();
 		$result['deleted_count']         = $gate['deleted_count'];
 		$result['already_missing_count'] = $gate['already_missing_count'];
 		$result['failed_count']          = $gate['failed_count'] + (int) $result['failed_count'];
 		$result['remaining_count']       = $gate['remaining_count'];
 		$result['eligible_count']        = max( (int) $result['eligible_count'], (int) $gate['eligible_count'] );
-		$result['delete_old_files_ready'] = $gate['delete_old_files_ready'] && 0 === (int) $result['failed_count'];
-		$result['ready']                 = $result['delete_old_files_ready'];
+		$result['delete_old_files_ready'] = ! empty( $result['dry_run_pass'] ) && empty( $result['failed_count'] ) && empty( $gate['duplicate_manifest_rows'] ) && empty( $gate['status_counts']['copying'] ) && empty( $gate['status_counts']['copied'] );
+		$result['ready']                 = $result['dry_run_pass'];
 		$result['pass']                  = $result['ready'];
 		$result['skipped_count']         = (int) $result['already_missing_count'] + (int) $result['failed_count'];
 		if ( $store ) {
@@ -137,6 +157,9 @@ final class Old_File_Deletion_Service {
 			'ready'                => false,
 			'generated_at'         => null,
 			'completed_at'         => null,
+			'dry_run_pass'         => false,
+			'dry_run_completed_at'  => null,
+			'dry_run_status'       => 'not_run',
 			'last_batch_at'        => null,
 			'last_manifest_id'     => 0,
 			'processed'            => 0,
@@ -277,22 +300,18 @@ final class Old_File_Deletion_Service {
 		$result['status_counts']     = $gate['status_counts'];
 		$result['duplicate_manifest_rows'] = $gate['duplicate_manifest_rows'];
 		$result['delete_old_files_ready'] = $gate['delete_old_files_ready'];
-		$result['ready']             = $gate['delete_old_files_ready']
-			&& 0 === (int) $result['failed_count']
-			&& 0 === (int) $gate['failed_count']
-			&& 0 === (int) $gate['duplicate_manifest_rows']
-			&& empty( $gate['status_counts']['copying'] )
-			&& empty( $gate['status_counts']['copied'] )
-			&& empty( $gate['status_counts']['failed'] )
-			&& empty( $gate['verify']['missing_new_files'] )
-			&& empty( $gate['verify']['integrity_mismatches'] )
-			&& empty( $gate['verify']['metadata_errors'] )
-			&& empty( $gate['old_url_audit']['migrated_mapping_old_url_remaining'] )
-			&& empty( $gate['old_url_audit']['non_migrated_manifest_url_remaining'] )
-			&& empty( $gate['old_url_audit']['orphan_old_upload_url_remaining'] );
+		$preview_ready = 0 === (int) $result['failed_count']
+			&& empty( $result['errors_count'] )
+			&& empty( $result['missing_new_files'] )
+			&& empty( $result['integrity_mismatches'] )
+			&& empty( $result['metadata_errors'] );
+		$result['ready']             = $read_only ? $preview_ready : $gate['delete_old_files_ready'];
 		$result['pass']             = $result['ready'];
-		$result['completed_at']     = $read_only ? null : current_time( 'mysql' );
+		$result['completed_at']     = $read_only ? current_time( 'mysql' ) : current_time( 'mysql' );
 		$result['generated_at']     = $result['generated_at'] ?? current_time( 'mysql' );
+		if ( $read_only ) {
+			$result['dry_run_pass'] = $preview_ready;
+		}
 		$this->append_counts( $result );
 		return $result;
 	}
@@ -305,8 +324,19 @@ final class Old_File_Deletion_Service {
 	 */
 	public function store_state( array $result ) {
 		$state = $this->state();
+		$is_dry_run_result = ! empty( $result['dry_run_completed_at'] )
+			|| in_array( (string) ( $result['dry_run_status'] ?? '' ), array( 'pass', 'fail' ), true );
 		$state['generated_at']          = $result['generated_at'] ?? current_time( 'mysql' );
 		$state['completed_at']          = $result['completed_at'] ?? null;
+		if ( $is_dry_run_result ) {
+			$state['dry_run_pass']         = ! empty( $result['dry_run_pass'] );
+			$state['dry_run_completed_at'] = $result['dry_run_completed_at'] ?? ( ! empty( $result['dry_run_pass'] ) ? ( $result['completed_at'] ?? current_time( 'mysql' ) ) : null );
+			$state['dry_run_status']       = $result['dry_run_status'] ?? ( ! empty( $result['dry_run_pass'] ) ? 'pass' : ( ! empty( $result['dry_run_completed_at'] ) ? 'fail' : 'not_run' ) );
+		} else {
+			$state['dry_run_pass']         = ! empty( $state['dry_run_pass'] );
+			$state['dry_run_completed_at'] = $state['dry_run_completed_at'] ?? null;
+			$state['dry_run_status']       = $state['dry_run_status'] ?? 'not_run';
+		}
 		$state['last_batch_at']         = $result['last_batch_at'] ?? null;
 		$state['last_manifest_id']      = $result['last_manifest_id'] ?? 0;
 		$state['ready']                 = ! empty( $result['ready'] );
@@ -336,6 +366,7 @@ final class Old_File_Deletion_Service {
 		$old_abs = wp_normalize_path( (string) ( $row['old_abs_path'] ?? '' ) );
 		$new_abs = wp_normalize_path( (string) ( $row['new_abs_path'] ?? '' ) );
 		$old_rel = str_replace( '\\', '/', ltrim( str_replace( $this->uploads_base_dir, '', $old_abs ), '/' ) );
+		$new_rel = str_replace( '\\', '/', ltrim( str_replace( $this->uploads_base_dir, '', $new_abs ), '/' ) );
 
 		if ( '' === $old_abs || '' === $new_abs ) {
 			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d is missing deletion paths.', $row['id'] ) );
@@ -343,8 +374,34 @@ final class Old_File_Deletion_Service {
 		if ( 0 !== strpos( $old_abs, $this->uploads_base_dir . '/' ) ) {
 			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d old path is outside uploads.', $row['id'] ) );
 		}
+		if ( 0 !== strpos( $new_abs, $this->uploads_base_dir . '/' ) ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d new path is outside uploads.', $row['id'] ) );
+		}
+		$new_real = realpath( $new_abs );
+		if ( false === $new_real ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d new file path could not be resolved.', $row['id'] ) );
+		}
+		$new_real = wp_normalize_path( $new_real );
+		if ( 0 !== strpos( $new_real, $this->uploads_base_dir . '/' ) ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d new file resolves outside uploads.', $row['id'] ) );
+		}
+		if ( is_link( $new_abs ) ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d new file is a symlink and will not be used for deletion safety checks.', $row['id'] ) );
+		}
+		if ( ! is_file( $new_abs ) ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d new file is not a regular file.', $row['id'] ) );
+		}
+		if ( false !== strpos( $new_rel, '/' ) ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d new file must be flattened into the uploads root.', $row['id'] ) );
+		}
+		if ( preg_match( '~/[0-9]{4}/[0-9]{2}/~', '/' . $new_rel ) ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d new file still contains a dated uploads path.', $row['id'] ) );
+		}
 		if ( ! preg_match( '~/[0-9]{4}/[0-9]{2}/~', '/' . $old_rel ) ) {
 			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d old path is not in a dated uploads folder.', $row['id'] ) );
+		}
+		if ( false !== strpos( $old_rel, '/..' ) || false !== strpos( $new_rel, '/..' ) ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d path traversal was detected.', $row['id'] ) );
 		}
 		if ( $old_abs === $new_abs ) {
 			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d old and new paths are identical.', $row['id'] ) );
@@ -357,6 +414,17 @@ final class Old_File_Deletion_Service {
 		}
 		if ( ! file_exists( $old_abs ) ) {
 			return array( 'status' => 'already_missing', 'message' => sprintf( 'Manifest row %d old file is already missing.', $row['id'] ) );
+		}
+		$old_real = realpath( $old_abs );
+		if ( false === $old_real ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d old file path could not be resolved.', $row['id'] ) );
+		}
+		$old_real = wp_normalize_path( $old_real );
+		if ( 0 !== strpos( $old_real, $this->uploads_base_dir . '/' ) ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d old file resolves outside uploads.', $row['id'] ) );
+		}
+		if ( ! is_file( $old_abs ) ) {
+			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d old file is not a regular file.', $row['id'] ) );
 		}
 		clearstatcache( true, $old_abs );
 		clearstatcache( true, $new_abs );
@@ -379,6 +447,68 @@ final class Old_File_Deletion_Service {
 	}
 
 	/**
+	 * Convert a timestamp-like value to unix time.
+	 *
+	 * @param mixed $value Timestamp string or null.
+	 * @return int
+	 */
+	private function timestamp_value( $value ) {
+		if ( empty( $value ) ) {
+			return 0;
+		}
+		$time = strtotime( (string) $value );
+		return false === $time ? 0 : (int) $time;
+	}
+
+	/**
+	 * Return the latest successful export format from redirect readiness.
+	 *
+	 * @param array<string, mixed> $redirect Redirect readiness.
+	 * @return string
+	 */
+	private function latest_export_format( array $redirect ) {
+		$exports = isset( $redirect['latest_exports'] ) && is_array( $redirect['latest_exports'] ) ? $redirect['latest_exports'] : array();
+		$latest_format = '';
+		$latest_time   = 0;
+		foreach ( array( 'apache', 'nginx', 'csv' ) as $format ) {
+			if ( empty( $exports[ $format ]['file_name'] ) ) {
+				continue;
+			}
+			$time = $this->timestamp_value( $exports[ $format ]['generated_at'] ?? null );
+			if ( $time >= $latest_time ) {
+				$latest_time   = $time;
+				$latest_format = $format;
+			}
+		}
+
+		return $latest_format;
+	}
+
+	/**
+	 * Return the latest successful export file from redirect readiness.
+	 *
+	 * @param array<string, mixed> $redirect Redirect readiness.
+	 * @return string
+	 */
+	private function latest_export_file( array $redirect ) {
+		$exports = isset( $redirect['latest_exports'] ) && is_array( $redirect['latest_exports'] ) ? $redirect['latest_exports'] : array();
+		$latest_file = '';
+		$latest_time = 0;
+		foreach ( array( 'apache', 'nginx', 'csv' ) as $format ) {
+			if ( empty( $exports[ $format ]['file_name'] ) ) {
+				continue;
+			}
+			$time = $this->timestamp_value( $exports[ $format ]['generated_at'] ?? null );
+			if ( $time >= $latest_time ) {
+				$latest_time = $time;
+				$latest_file = (string) $exports[ $format ]['file_name'];
+			}
+		}
+
+		return $latest_file;
+	}
+
+	/**
 	 * Delete one eligible row's file.
 	 *
 	 * @param array<string, mixed> $row Manifest row.
@@ -390,7 +520,38 @@ final class Old_File_Deletion_Service {
 		$old_abs = wp_normalize_path( (string) $row['old_abs_path'] );
 		$bytes   = (int) ( $check['bytes'] ?? 0 );
 
-		if ( @unlink( $old_abs ) ) {
+		$delete_error = null;
+		$deleted = false;
+		if ( function_exists( 'wp_delete_file' ) ) {
+			try {
+				wp_delete_file( $old_abs );
+			} catch ( \Throwable $exception ) {
+				$delete_error = $exception->getMessage();
+			}
+		}
+		clearstatcache( true, $old_abs );
+		if ( ! file_exists( $old_abs ) ) {
+			$deleted = true;
+		} else {
+			$handler = static function ( $severity, $message ) use ( &$delete_error ) {
+				$delete_error = $message;
+				return true;
+			};
+			set_error_handler( $handler );
+			try {
+				$deleted = unlink( $old_abs );
+			} catch ( \Throwable $exception ) {
+				$deleted = false;
+				$delete_error = $exception->getMessage();
+			}
+			restore_error_handler();
+			clearstatcache( true, $old_abs );
+			if ( ! file_exists( $old_abs ) ) {
+				$deleted = true;
+			}
+		}
+
+		if ( $deleted ) {
 			$result['deleted_count']++;
 			$result['bytes_freed'] += $bytes;
 			$this->repository->update_old_delete_status( (int) $row['id'], 'deleted', null );
@@ -401,7 +562,12 @@ final class Old_File_Deletion_Service {
 
 		$result['failed_count']++;
 		$result['errors_count']++;
-		$message = sprintf( 'Could not delete old file for manifest row %d: %s', $row['id'], $row['old_rel_path'] );
+		$message = sprintf(
+			'Could not delete old file for manifest row %d: %s%s',
+			$row['id'],
+			$row['old_rel_path'],
+			$delete_error ? ' (' . $delete_error . ')' : ''
+		);
 		$result['errors'][] = $message;
 		$this->repository->update_old_delete_status( (int) $row['id'], 'failed', $message );
 		$this->log( $result, $message );
