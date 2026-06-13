@@ -21,9 +21,16 @@
 	var redirectResult = document.getElementById('mfm-redirect-result');
 	var deleteStatus = document.getElementById('mfm-delete-status');
 	var deleteResult = document.getElementById('mfm-delete-result');
+	var cleanupStatus = document.getElementById('mfm-cleanup-status');
+	var cleanupResult = document.getElementById('mfm-cleanup-result');
+	var finalStatus = document.getElementById('mfm-final-status');
+	var finalResult = document.getElementById('mfm-final-result');
 	var deleteConfirmCheck = document.getElementById('mfm-delete-confirm-check');
 	var deleteConfirmPhrase = document.getElementById('mfm-delete-confirm-phrase');
 	var deleteRunButton = document.getElementById('mfm-delete-run');
+	var cleanupConfirmCheck = document.getElementById('mfm-cleanup-confirm-check');
+	var cleanupConfirmPhrase = document.getElementById('mfm-cleanup-confirm-phrase');
+	var cleanupRunButton = document.getElementById('mfm-cleanup-run');
 
 	function request(action, data) {
 		var body = new URLSearchParams(Object.assign({ action: action, nonce: config.nonce }, data || {}));
@@ -95,6 +102,8 @@
 			batchAction = 'media_flatten_run_old_url_audit_batch';
 		} else if (currentJob.base_type === 'delete_old_files') {
 			batchAction = 'media_flatten_delete_old_files_batch';
+		} else if (currentJob.base_type === 'cleanup_empty_dirs') {
+			batchAction = 'media_flatten_cleanup_empty_dirs_batch';
 		}
 		request(batchAction, data).then(function (response) {
 			renderJob(response.job);
@@ -124,6 +133,13 @@
 				showNotice('Check the backup box and type DELETE OLD FILES before starting deletion.', 'error');
 				return;
 			}
+		} else if (!dryRun && base === 'cleanup_empty_dirs') {
+			var cleanupConfirmChecked = cleanupConfirmCheck && cleanupConfirmCheck.checked;
+			var cleanupConfirmText = cleanupConfirmPhrase ? cleanupConfirmPhrase.value.trim() : '';
+			if (!cleanupConfirmChecked || cleanupConfirmText !== 'CLEANUP EMPTY DIRECTORIES') {
+				showNotice('Check the box and type CLEANUP EMPTY DIRECTORIES before starting cleanup.', 'error');
+				return;
+			}
 		} else if (!dryRun && type !== 'verify' && !window.confirm(config.confirm)) {
 			return;
 		}
@@ -136,6 +152,8 @@
 			startAction = 'media_flatten_start_old_url_audit';
 		} else if (type === 'delete_old_files' || type === 'delete_old_files_dry_run') {
 			startAction = dryRun ? 'media_flatten_delete_old_files_dry_run' : 'media_flatten_start_delete_old_files';
+		} else if (type === 'cleanup_empty_dirs' || type === 'cleanup_empty_dirs_dry_run') {
+			startAction = dryRun ? 'media_flatten_cleanup_empty_dirs_dry_run' : 'media_flatten_start_cleanup_empty_dirs';
 		}
 		var payload = {
 			job_type: type,
@@ -144,6 +162,10 @@
 		if (base === 'delete_old_files' && !dryRun) {
 			payload.delete_confirm_checked = deleteConfirmCheck && deleteConfirmCheck.checked ? 1 : 0;
 			payload.delete_confirm_phrase = deleteConfirmPhrase ? deleteConfirmPhrase.value.trim() : '';
+		}
+		if (base === 'cleanup_empty_dirs' && !dryRun) {
+			payload.cleanup_confirm_checked = cleanupConfirmCheck && cleanupConfirmCheck.checked ? 1 : 0;
+			payload.cleanup_confirm_phrase = cleanupConfirmPhrase ? cleanupConfirmPhrase.value.trim() : '';
 		}
 		request(startAction, payload).then(function (response) {
 			renderJob(response.job);
@@ -177,9 +199,14 @@
 			var audit = report.old_url_audit || {};
 			var redirectExport = report.redirect_export || {};
 			var deleteReport = report.delete_old_files || {};
+			var deleteReadiness = report.delete_readiness || {};
+			var cleanupReport = report.cleanup_result || {};
+			var cleanupReadiness = report.cleanup_readiness || {};
+			var finalReport = report.final_report || {};
 			var redirectPreviewStatus = report.redirect_preview_status || {};
 			var redirectExportStatus = report.redirect_export_status || {};
-			var deleteReady = Boolean(report.delete_old_files_ready || deleteReport.delete_old_files_ready || deleteReport.ready);
+			var deleteReady = Boolean(report.delete_old_files_ready || deleteReadiness.delete_old_files_ready || deleteReadiness.ready);
+			var cleanupReady = Boolean(report.cleanup_ready || cleanupReadiness.cleanup_ready || cleanupReadiness.ready);
 			var latestExports = redirectExport.exports || {};
 			var latestPreview = redirectExport.preview || redirectExport.latest_preview || {};
 			var extensionCounts = latestPreview.extension_counts || {};
@@ -214,6 +241,11 @@
 				['Final redirect export status', redirectExportStatus.label || (redirectExportStatus.has_run ? (redirectExportStatus.ready ? 'PASS' : 'FAIL') : 'Not run yet')],
 				['Final redirect export ready', report.redirect_export_ready ? 'Yes' : 'No'],
 				['Delete Old Files Ready', deleteReady ? 'Yes' : 'No'],
+				['Delete dry-run status', (deleteReadiness.dry_run_status || deleteReport.dry_run_status || 'not_run').replace(/_/g, ' ').toUpperCase()],
+				['Last successful dry-run', deleteReadiness.dry_run_completed_at || deleteReport.dry_run_completed_at || '-'],
+				['Final redirect export has run', deleteReadiness.final_redirect_export_has_run ? 'Yes' : 'No'],
+				['Latest successful export format', deleteReadiness.final_redirect_export_format || '-'],
+				['Latest successful export file', deleteReadiness.final_redirect_export_file || '-'],
 				['Delete eligible', deleteReport.eligible_count || 0],
 				['Delete deleted', deleteReport.deleted_count || 0],
 				['Delete already missing', deleteReport.already_missing_count || 0],
@@ -222,6 +254,20 @@
 				['Delete bytes freed', deleteReport.bytes_freed || 0],
 				['Latest delete batch', deleteReport.last_batch_at || '-'],
 				['Latest deletion errors', (deleteReport.errors || deleteReport.latest_errors || []).length || 0],
+				['Cleanup Ready', cleanupReady ? 'Yes' : 'No'],
+				['Cleanup dry-run status', (cleanupReadiness.dry_run_status || cleanupReport.dry_run_status || 'not_run').replace(/_/g, ' ').toUpperCase()],
+				['Last cleanup dry-run', cleanupReadiness.dry_run_completed_at || cleanupReport.dry_run_completed_at || '-'],
+				['Empty month dirs', cleanupReport.empty_month_dirs_found || 0],
+				['Empty year dirs', cleanupReport.empty_year_dirs_found || 0],
+				['Directories removed', cleanupReport.removed_count || 0],
+				['Directories remaining', cleanupReadiness.remaining_old_directories || cleanupReport.remaining_count || 0],
+				['Latest cleanup time', cleanupReport.last_cleanup_at || cleanupReport.completed_at || '-'],
+				['Final Migration Status', finalReport.generated_at ? (finalReport.status || (finalReport.pass ? 'PASS' : 'NOT READY')) : 'Not run yet'],
+				['Final report time', finalReport.generated_at || '-'],
+				['Final report old files remaining', finalReport.old_files_remaining || 0],
+				['Final report directories remaining', finalReport.old_yyyy_mm_directories_remaining || 0],
+				['Final report unsafe dirs', finalReport.unsafe_directories_remaining || 0],
+				['Final report cleanup failures', finalReport.cleanup_failures || 0],
 				['Migrated mappings available', latestPreview.total_migrated_mappings || 0],
 				['Redirect Rules', latestPreview.redirect_rule_count || 0],
 				['Persian / non-ASCII mappings', latestPreview.unicode_filename_count || 0],
@@ -262,13 +308,20 @@
 			});
 			if (deleteRunButton) {
 				var deleteConfirmOk = Boolean(deleteConfirmCheck && deleteConfirmCheck.checked && deleteConfirmPhrase && deleteConfirmPhrase.value.trim() === 'DELETE OLD FILES');
-				deleteRunButton.disabled = !(deleteReady && deleteConfirmOk);
+				var dryRunOk = (deleteReadiness.dry_run_status || deleteReport.dry_run_status || '') === 'pass';
+				deleteRunButton.disabled = !(deleteReady && deleteConfirmOk && dryRunOk);
+			}
+			if (cleanupRunButton) {
+				var cleanupConfirmOk = Boolean(cleanupConfirmCheck && cleanupConfirmCheck.checked && cleanupConfirmPhrase && cleanupConfirmPhrase.value.trim() === 'CLEANUP EMPTY DIRECTORIES');
+				cleanupRunButton.disabled = !(cleanupReady && cleanupConfirmOk);
 			}
 			clearLockButton.hidden = !report.lock_is_stale;
 			renderVerify(report.verify);
 			renderAudit(report.old_url_audit);
 			renderRedirect(report);
 			renderDelete(deleteReport);
+			renderCleanup(Object.assign({}, cleanupReport, cleanupReadiness));
+			renderFinalReport(finalReport);
 			if (report.job && report.job.job_type && !running && (!currentJob || !currentJob.dry_run)) {
 				renderJob(report.job);
 			}
@@ -363,19 +416,84 @@
 			return;
 		}
 
-		var ready = Boolean(result.ready || result.delete_old_files_ready);
+		var ready = Boolean(result.delete_old_files_ready);
+		var dryRunStatus = (result.dry_run_status || (result.dry_run_pass ? 'pass' : 'not_run')).replace(/_/g, ' ').toUpperCase();
 		deleteStatus.className = 'mfm-verify-status ' + (ready ? 'mfm-pass' : 'mfm-fail');
 		deleteStatus.textContent = (ready ? 'READY' : 'NOT READY') + ' | eligible ' + (result.eligible_count || 0) +
 			' | deleted ' + (result.deleted_count || 0) +
 			' | missing ' + (result.already_missing_count || 0) +
 			' | failed ' + (result.failed_count || 0) +
-			' | bytes freed ' + (result.bytes_freed || 0);
+			' | bytes freed ' + (result.bytes_freed || 0) +
+			' | dry-run ' + dryRunStatus +
+			' | export ' + (result.final_redirect_export_has_run ? 'YES' : 'NO');
 		deleteResult.textContent = JSON.stringify(result, null, 2);
+	}
+
+	function renderCleanup(result) {
+		if (!result || (!result.generated_at && !result.completed_at && !result.last_batch_at && !result.dry_run_completed_at)) {
+			cleanupStatus.className = 'mfm-verify-status';
+			cleanupStatus.textContent = 'Not run yet.';
+			cleanupResult.textContent = 'No cleanup report stored.';
+			return;
+		}
+
+		var ready = Boolean(result.cleanup_ready);
+		var dryRunPassed = Boolean(result.dry_run_pass);
+		var dryRunStatus = (result.dry_run_status || (dryRunPassed ? 'pass' : 'not_run')).replace(/_/g, ' ').toUpperCase();
+		cleanupStatus.className = 'mfm-verify-status ' + (ready ? 'mfm-pass' : (dryRunPassed ? 'mfm-warning' : 'mfm-fail'));
+		cleanupStatus.textContent = (ready ? 'READY' : (dryRunPassed ? 'DRY RUN PASS' : 'NOT READY')) + ' | remaining ' + (result.remaining_old_directories || result.remaining_count || 0) +
+			' | removed ' + (result.removed_count || 0) +
+			' | empty month ' + (result.empty_month_dirs_found || 0) +
+			' | empty year ' + (result.empty_year_dirs_found || 0) +
+			' | not empty ' + (result.skipped_not_empty_count || 0) +
+			' | unsafe ' + (result.skipped_unsafe_count || 0) +
+			' | dry-run ' + dryRunStatus;
+		cleanupResult.textContent = JSON.stringify(result, null, 2);
+	}
+
+	function renderFinalReport(result) {
+		if (!result || (!result.generated_at && !result.verified_at && !result.audited_at)) {
+			finalStatus.className = 'mfm-verify-status';
+			finalStatus.textContent = 'Not run yet.';
+			finalResult.textContent = 'No final migration report stored.';
+			return;
+		}
+
+		var pass = Boolean(result.pass);
+		finalStatus.className = 'mfm-verify-status ' + (pass ? 'mfm-pass' : 'mfm-fail');
+		finalStatus.textContent = (pass ? 'PASS' : 'NOT READY') + ' | manifest ' + (result.total_manifest_rows || 0) +
+			' | migrated ' + (result.total_migrated_rows || 0) +
+			' | old files remaining ' + (result.old_files_remaining || 0) +
+			' | dirs remaining ' + (result.old_yyyy_mm_directories_remaining || 0) +
+			' | unsafe dirs ' + (result.unsafe_directories_remaining || 0) +
+			' | old URLs ' + (result.remaining_old_url_occurrences || 0);
+		finalResult.textContent = JSON.stringify(result, null, 2);
 	}
 
 	function refreshDelete() {
 		request('media_flatten_get_delete_report').then(function (response) {
-			renderDelete(response.result || {});
+			var result = Object.assign({}, response.result || {}, response.readiness || {});
+			renderDelete(result);
+			refreshReport();
+		}).catch(function (error) {
+			showNotice(error.message, 'error');
+		});
+	}
+
+	function refreshCleanup() {
+		request('media_flatten_get_cleanup_report').then(function (response) {
+			var result = Object.assign({}, response.result || {}, response.readiness || {});
+			renderCleanup(result);
+			refreshReport();
+		}).catch(function (error) {
+			showNotice(error.message, 'error');
+		});
+	}
+
+	function refreshFinalReport() {
+		request('media_flatten_get_final_report').then(function (response) {
+			var result = response.result || response.state || {};
+			renderFinalReport(result);
 			refreshReport();
 		}).catch(function (error) {
 			showNotice(error.message, 'error');
@@ -431,6 +549,12 @@
 	if (document.getElementById('mfm-refresh-delete')) {
 		document.getElementById('mfm-refresh-delete').addEventListener('click', refreshDelete);
 	}
+	if (document.getElementById('mfm-refresh-cleanup')) {
+		document.getElementById('mfm-refresh-cleanup').addEventListener('click', refreshCleanup);
+	}
+	if (document.getElementById('mfm-refresh-final')) {
+		document.getElementById('mfm-refresh-final').addEventListener('click', refreshFinalReport);
+	}
 	if (document.getElementById('mfm-redirect-status')) {
 		refreshRedirect();
 	}
@@ -439,6 +563,12 @@
 	}
 	if (deleteConfirmPhrase) {
 		deleteConfirmPhrase.addEventListener('input', refreshReport);
+	}
+	if (cleanupConfirmCheck) {
+		cleanupConfirmCheck.addEventListener('change', refreshReport);
+	}
+	if (cleanupConfirmPhrase) {
+		cleanupConfirmPhrase.addEventListener('input', refreshReport);
 	}
 	stopButton.addEventListener('click', stopJob);
 	resumeButton.addEventListener('click', function () {
