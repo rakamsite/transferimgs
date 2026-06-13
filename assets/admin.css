@@ -1,0 +1,106 @@
+.media-flatten-admin {
+	max-width: 1200px;
+}
+
+.mfm-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	gap: 16px;
+	margin: 16px 0;
+}
+
+.mfm-panel {
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	box-shadow: 0 1px 1px rgba(0, 0, 0, .04);
+	padding: 16px;
+	margin: 16px 0;
+}
+
+.mfm-panel h2 {
+	margin-top: 0;
+}
+
+.mfm-cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+	gap: 10px;
+}
+
+.mfm-card {
+	background: #f6f7f7;
+	border-left: 4px solid #2271b1;
+	padding: 12px;
+}
+
+.mfm-card strong,
+.mfm-card span {
+	display: block;
+}
+
+.mfm-card strong {
+	font-size: 20px;
+	margin-bottom: 4px;
+}
+
+.mfm-progress {
+	background: #dcdcde;
+	height: 18px;
+	overflow: hidden;
+}
+
+#mfm-progress-bar {
+	background: #2271b1;
+	display: block;
+	height: 100%;
+	transition: width .2s ease;
+	width: 0;
+}
+
+.mfm-notice {
+	border-left: 4px solid #72aee6;
+	background: #fff;
+	padding: 12px;
+	margin: 16px 0;
+}
+
+.mfm-success {
+	border-left-color: #00a32a;
+}
+
+.mfm-warning {
+	border-left-color: #dba617;
+}
+
+.mfm-error {
+	border-left-color: #d63638;
+}
+
+.mfm-verify-status {
+	border: 1px solid #c3c4c7;
+	font-size: 18px;
+	font-weight: 600;
+	margin-top: 16px;
+	padding: 12px;
+}
+
+.mfm-pass {
+	background: #edfaef;
+	border-color: #00a32a;
+	color: #006b1b;
+}
+
+.mfm-fail {
+	background: #fcf0f1;
+	border-color: #d63638;
+	color: #8a2424;
+}
+
+.media-flatten-admin pre {
+	background: #1d2327;
+	color: #f0f0f1;
+	max-height: 320px;
+	overflow: auto;
+	padding: 12px;
+	white-space: pre-wrap;
+}
