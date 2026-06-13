@@ -508,6 +508,156 @@ final class CLI_Command {
 	}
 
 	/**
+	 * Safely delete old source files after all readiness gates pass.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--batch=<count>]
+	 * : Maximum files to process per batch. Default: 10. Maximum: 50.
+	 *
+	 * [--dry-run]
+	 * : Show deletion candidates without deleting files or changing the database.
+	 *
+	 * [--yes]
+	 * : Required for actual deletion.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp media-flatten delete-old-files --dry-run
+	 *     wp media-flatten delete-old-files --batch=10 --yes
+	 *
+	 * @param array<int, string>   $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Named arguments.
+	 * @return void
+	 */
+	public function delete_old_files( $args, $assoc_args ) {
+		$batch_size = (int) \WP_CLI\Utils\get_flag_value( $assoc_args, 'batch', 10 );
+		$dry_run    = isset( $assoc_args['dry-run'] );
+		$yes        = isset( $assoc_args['yes'] );
+
+		if ( $batch_size < 1 ) {
+			\WP_CLI::error( 'Batch size must be a positive integer.' );
+		}
+		if ( $batch_size > 50 ) {
+			\WP_CLI::error( 'Batch size must not exceed 50.' );
+		}
+		if ( ! $dry_run && ! $yes ) {
+			\WP_CLI::error( 'Actual deletion requires --yes. Use --dry-run first to review the candidate files.' );
+		}
+
+		try {
+			$repository = new Manifest_Repository();
+			if ( ! $repository->table_exists() ) {
+				\WP_CLI::error( 'Manifest table is not installed. Run: wp media-flatten install' );
+			}
+
+			$service   = new Old_File_Deletion_Service( $repository );
+			$readiness = $service->readiness();
+
+			if ( empty( $readiness['ready'] ) ) {
+				\WP_CLI::warning( 'Delete readiness has not fully passed. Review the reported blockers before deleting files.' );
+				$this->format_key_value_summary(
+					array(
+						'ready'                 => ! empty( $readiness['ready'] ) ? 'yes' : 'no',
+						'delete_old_files_ready' => ! empty( $readiness['delete_old_files_ready'] ) ? 'yes' : 'no',
+						'eligible_count'        => $readiness['eligible_count'] ?? 0,
+						'deleted_count'         => $readiness['deleted_count'] ?? 0,
+						'already_missing_count' => $readiness['already_missing_count'] ?? 0,
+						'failed_count'          => $readiness['failed_count'] ?? 0,
+						'bytes_eligible'        => $readiness['bytes_eligible'] ?? 0,
+						'bytes_freed'           => $readiness['bytes_freed'] ?? 0,
+					)
+				);
+				foreach ( $readiness['verify']['errors'] ?? array() as $message ) {
+					\WP_CLI::warning( $message );
+				}
+				foreach ( $readiness['old_url_audit']['errors'] ?? array() as $message ) {
+					\WP_CLI::warning( $message );
+				}
+				foreach ( $readiness['latest_errors'] ?? array() as $message ) {
+					\WP_CLI::warning( $message );
+				}
+				if ( ! $dry_run ) {
+					\WP_CLI::error( 'Delete readiness failed. Use --dry-run to review the candidate files only.' );
+				}
+			}
+
+			if ( $dry_run ) {
+				$result = $service->report( $batch_size, false );
+				$this->format_key_value_summary(
+					array(
+						'ready'                 => ! empty( $result['ready'] ) ? 'yes' : 'no',
+						'eligible_count'        => $result['eligible_count'] ?? 0,
+						'deleted_count'         => $result['deleted_count'] ?? 0,
+						'already_missing_count' => $result['already_missing_count'] ?? 0,
+						'failed_count'          => $result['failed_count'] ?? 0,
+						'bytes_eligible'        => $result['bytes_eligible'] ?? 0,
+						'bytes_freed'           => $result['bytes_freed'] ?? 0,
+					)
+				);
+				$this->format_items(
+					$result['samples']['eligible'] ?? array(),
+					array( 'manifest_id', 'attachment_id', 'old_rel_path', 'new_rel_path', 'old_abs_path', 'new_abs_path', 'result', 'message' )
+				);
+				if ( ! empty( $result['errors'] ) ) {
+					\WP_CLI::log( 'Deletion errors:' );
+					foreach ( $result['errors'] as $message ) {
+						\WP_CLI::warning( $message );
+					}
+				}
+				\WP_CLI::success( 'Read-only old-file deletion preview complete. No files or database records were changed.' );
+				return;
+			}
+
+			$cursor  = 0;
+			$summary = $service->initial_result();
+			do {
+				$batch_result = $service->run_batch( $cursor, $batch_size, $summary, false );
+				$summary      = $batch_result['result'];
+				$cursor       = $batch_result['last_manifest_id'];
+				$this->format_key_value_summary(
+					array(
+						'processed'        => $batch_result['summary']['processed'] ?? 0,
+						'eligible'         => $batch_result['summary']['eligible'] ?? 0,
+						'deleted'          => $batch_result['summary']['deleted'] ?? 0,
+						'already_missing'  => $batch_result['summary']['already_missing'] ?? 0,
+						'failed'           => $batch_result['summary']['failed'] ?? 0,
+						'bytes_freed'      => $batch_result['summary']['bytes_freed'] ?? 0,
+						'last_manifest_id' => $batch_result['summary']['last_manifest_id'] ?? $cursor,
+					)
+				);
+			} while ( ! $batch_result['done'] );
+
+			$summary = $service->finalize( $summary, false );
+			$service->store_state( $summary );
+
+			$this->format_key_value_summary(
+				array(
+					'pass'                  => ! empty( $summary['pass'] ) ? 'yes' : 'no',
+					'ready'                 => ! empty( $summary['ready'] ) ? 'yes' : 'no',
+					'eligible_count'        => $summary['eligible_count'] ?? 0,
+					'deleted_count'         => $summary['deleted_count'] ?? 0,
+					'already_missing_count' => $summary['already_missing_count'] ?? 0,
+					'failed_count'          => $summary['failed_count'] ?? 0,
+					'bytes_eligible'        => $summary['bytes_eligible'] ?? 0,
+					'bytes_freed'           => $summary['bytes_freed'] ?? 0,
+				)
+			);
+
+			if ( ! empty( $summary['errors'] ) ) {
+				\WP_CLI::log( 'Deletion errors:' );
+				foreach ( $summary['errors'] as $message ) {
+					\WP_CLI::warning( $message );
+				}
+			}
+
+			\WP_CLI::success( 'Old-file deletion complete.' );
+		} catch ( \RuntimeException $exception ) {
+			\WP_CLI::error( $exception->getMessage() );
+		}
+	}
+
+	/**
 	 * Run the pre-redirect old dated upload URL audit.
 	 *
 	 * ## OPTIONS
@@ -682,6 +832,7 @@ final class CLI_Command {
 		$batch_reporter = new Batch_Migrator( $repository, new Single_Attachment_Migrator( $repository ) );
 		$verify         = get_option( Admin_Controller::VERIFY_RESULT_OPTION, array() );
 		$old_url_audit  = get_option( Admin_Controller::OLD_URL_AUDIT_RESULT_OPTION, array() );
+		$delete_result   = get_option( Admin_Controller::DELETE_RESULT_OPTION, array() );
 
 		\WP_CLI::log( 'Attachment batch migration readiness:' );
 		$this->format_key_value_summary( $batch_reporter->report_counts() );
@@ -732,6 +883,8 @@ final class CLI_Command {
 		$redirect_export = get_option( Admin_Controller::REDIRECT_EXPORT_RESULT_OPTION, array() );
 		$redirect_service = new Redirect_Export_Service( $repository );
 		$redirect_readiness = $redirect_service->readiness();
+		$delete_service   = new Old_File_Deletion_Service( $repository );
+		$delete_readiness = $delete_service->readiness();
 		\WP_CLI::log( 'Latest old URL audit summary:' );
 		$this->format_key_value_summary(
 			$old_url_audit
@@ -760,6 +913,25 @@ final class CLI_Command {
 				'export_warnings_count'   => isset( $redirect_export['warnings'] ) ? count( $redirect_export['warnings'] ) : 0,
 				'export_errors_count'     => isset( $redirect_export['errors'] ) ? count( $redirect_export['errors'] ) : 0,
 			)
+		);
+
+		\WP_CLI::log( 'Latest old-file deletion summary:' );
+		$this->format_key_value_summary(
+			$delete_result
+				? array(
+					'status'                 => ! empty( $delete_result['ready'] ) ? 'READY' : 'NOT READY',
+					'generated_at'           => $delete_result['generated_at'] ?? '-',
+					'completed_at'           => $delete_result['completed_at'] ?? '-',
+					'delete_old_files_ready' => ! empty( $delete_readiness['delete_old_files_ready'] ) ? 'yes' : 'no',
+					'eligible_count'         => $delete_result['eligible_count'] ?? 0,
+					'deleted_count'          => $delete_result['deleted_count'] ?? 0,
+					'already_missing_count'  => $delete_result['already_missing_count'] ?? 0,
+					'failed_count'           => $delete_result['failed_count'] ?? 0,
+					'bytes_eligible'         => $delete_result['bytes_eligible'] ?? 0,
+					'bytes_freed'            => $delete_result['bytes_freed'] ?? 0,
+					'latest_errors_count'    => isset( $delete_result['errors'] ) && is_array( $delete_result['errors'] ) ? count( $delete_result['errors'] ) : 0,
+				)
+				: array( 'status' => 'Not run yet' )
 		);
 
 		\WP_CLI::success( 'Read-only report complete. No files or database records were changed.' );
