@@ -364,7 +364,9 @@ final class Old_File_Deletion_Service {
 	 */
 	private function evaluate_row( array $row ) {
 		$old_abs = wp_normalize_path( (string) ( $row['old_abs_path'] ?? '' ) );
-		$new_abs = wp_normalize_path( (string) ( $row['new_abs_path'] ?? '' ) );
+		$new_abs = 'omitted_size_collision' === (string) ( $row['status'] ?? '' )
+			? wp_normalize_path( (string) ( $row['main_new_abs_path'] ?? '' ) )
+			: wp_normalize_path( (string) ( $row['new_abs_path'] ?? '' ) );
 		$old_rel = str_replace( '\\', '/', ltrim( str_replace( $this->uploads_base_dir, '', $old_abs ), '/' ) );
 		$new_rel = str_replace( '\\', '/', ltrim( str_replace( $this->uploads_base_dir, '', $new_abs ), '/' ) );
 
@@ -425,6 +427,15 @@ final class Old_File_Deletion_Service {
 		}
 		if ( ! is_file( $old_abs ) ) {
 			return array( 'status' => 'failed', 'message' => sprintf( 'Manifest row %d old file is not a regular file.', $row['id'] ) );
+		}
+		if ( 'omitted_size_collision' === (string) ( $row['status'] ?? '' ) ) {
+			clearstatcache( true, $old_abs );
+			$old_size = @filesize( $old_abs );
+			return array(
+				'status'  => 'eligible',
+				'message' => sprintf( 'Manifest row %d is safe to delete because the colliding derivative was intentionally omitted and now falls back to the main file URL.', $row['id'] ),
+				'bytes'   => false === $old_size ? 0 : (int) $old_size,
+			);
 		}
 		clearstatcache( true, $old_abs );
 		clearstatcache( true, $new_abs );

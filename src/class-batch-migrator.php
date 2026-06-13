@@ -99,14 +99,44 @@ final class Batch_Migrator {
 					}
 
 					++$summary['eligible_attachments'];
+					if ( ! empty( $plan['has_adopted_sizes'] ) ) {
+						++$summary['attachments_eligible_with_adopted_sizes'];
+					}
+					if ( ! empty( $plan['has_omitted_sizes'] ) ) {
+						++$summary['attachments_eligible_with_omitted_sizes'];
+					}
+					if ( empty( $plan['has_adopted_sizes'] ) && empty( $plan['has_omitted_sizes'] ) ) {
+						++$summary['attachments_fully_eligible'];
+					}
+					$summary['adopted_size_rows'] += (int) ( $plan['adopted_size_rows'] ?? 0 );
+					$summary['omitted_size_rows'] += (int) ( $plan['omitted_size_rows'] ?? 0 );
+					$summary['adopted_hash_mismatch_warnings'] += (int) ( $plan['adopted_hash_mismatch_warnings'] ?? 0 );
 
 					if ( $dry_run ) {
 						++$summary['would_migrate_attachments'];
-						$this->emit( $callback, $attachment_id, 'would_migrate', 'eligible' );
+						$dry_run_reason = 'eligible';
+						if ( ! empty( $plan['has_adopted_sizes'] ) && ! empty( $plan['has_omitted_sizes'] ) ) {
+							$dry_run_reason = 'eligible with adopted and omitted sizes';
+						} elseif ( ! empty( $plan['has_adopted_sizes'] ) ) {
+							$dry_run_reason = 'eligible with adopted sizes';
+						} elseif ( ! empty( $plan['has_omitted_sizes'] ) ) {
+							$dry_run_reason = 'eligible with omitted sizes';
+						}
+						$this->emit( $callback, $attachment_id, 'would_migrate', $dry_run_reason );
 					} else {
-						$this->migrator->migrate( $plan );
+						$migration = $this->migrator->migrate( $plan );
 						++$summary['migrated_attachments'];
-						$this->emit( $callback, $attachment_id, 'migrated', 'success' );
+						$this->emit(
+							$callback,
+							$attachment_id,
+							'migrated',
+							sprintf(
+								'success; copied %d, adopted %d, omitted %d',
+								(int) ( $migration['copied'] ?? 0 ),
+								(int) ( $migration['adopted'] ?? 0 ),
+								(int) ( $migration['omitted'] ?? 0 )
+							)
+						);
 					}
 				} catch ( \Throwable $exception ) {
 					$reason = $exception->getMessage();
@@ -155,14 +185,18 @@ final class Batch_Migrator {
 	public function report_counts() {
 		$counts   = array(
 			'eligible_attachments_ready'       => 0,
+			'eligible_attachments_partial'     => 0,
 			'migrated_attachments'             => 0,
 			'already_migrated_attachments'     => 0,
 			'attachments_blocked_missing'      => 0,
 			'attachments_blocked_collision'    => 0,
+			'attachments_blocked_main_collision' => 0,
 			'failed_attachments'               => 0,
 			'remaining_resolved_attachments'   => 0,
 			'attachments_incomplete_targets'   => 0,
 			'attachments_other_ineligible'     => 0,
+			'adopted_root_sizes'               => 0,
+			'omitted_size_collisions'          => 0,
 		);
 		if ( ! $this->repository->table_exists() ) {
 			return $counts;
@@ -178,16 +212,17 @@ final class Batch_Migrator {
 				$row_count = (int) $candidate['row_count'];
 				$matched   = false;
 
-				if ( $row_count > 0 && (int) $candidate['resolved_rows'] === $row_count
-					&& 0 === (int) $candidate['incomplete_target_rows']
-				) {
-					++$counts['eligible_attachments_ready'];
-					++$counts['remaining_resolved_attachments'];
-					$matched = true;
-				}
-				if ( $row_count > 0 && (int) $candidate['migrated_rows'] === $row_count ) {
+				if ( $this->is_already_migrated_candidate( $candidate ) ) {
 					++$counts['migrated_attachments'];
 					++$counts['already_migrated_attachments'];
+					$matched = true;
+				}
+				if ( $this->is_candidate_eligible( $candidate ) ) {
+					++$counts['eligible_attachments_ready'];
+					++$counts['remaining_resolved_attachments'];
+					if ( (int) $candidate['image_collision_rows'] > 0 ) {
+						++$counts['eligible_attachments_partial'];
+					}
 					$matched = true;
 				}
 				if ( (int) $candidate['missing_rows'] > 0 ) {
@@ -196,6 +231,10 @@ final class Batch_Migrator {
 				}
 				if ( (int) $candidate['collision_rows'] > 0 ) {
 					++$counts['attachments_blocked_collision'];
+					$matched = true;
+				}
+				if ( (int) $candidate['main_collision_rows'] > 0 ) {
+					++$counts['attachments_blocked_main_collision'];
 					$matched = true;
 				}
 				if ( (int) $candidate['failed_rows'] > 0 ) {
@@ -212,6 +251,13 @@ final class Batch_Migrator {
 			}
 		} while ( count( $candidates ) === self::QUERY_BATCH_SIZE );
 
+		$status_counts = array();
+		foreach ( $this->repository->status_counts() as $row ) {
+			$status_counts[ $row['status'] ] = (int) $row['item_count'];
+		}
+		$counts['adopted_root_sizes']      = (int) ( $status_counts['adopted_root_size'] ?? 0 );
+		$counts['omitted_size_collisions'] = (int) ( $status_counts['omitted_size_collision'] ?? 0 );
+
 		return $counts;
 	}
 
@@ -222,14 +268,14 @@ final class Batch_Migrator {
 	private function classify( array $candidate ) {
 		$row_count = (int) $candidate['row_count'];
 
-		if ( $row_count > 0 && (int) $candidate['migrated_rows'] === $row_count ) {
+		if ( $this->is_already_migrated_candidate( $candidate ) ) {
 			return 'already_migrated';
 		}
-		if ( (int) $candidate['missing_rows'] > 0 ) {
+		if ( (int) $candidate['main_missing_rows'] > 0 || (int) $candidate['missing_rows'] > 0 ) {
 			return 'missing';
 		}
-		if ( (int) $candidate['collision_rows'] > 0 ) {
-			return 'blocked_collision';
+		if ( (int) $candidate['main_collision_rows'] > 0 ) {
+			return 'main_collision';
 		}
 		if ( (int) $candidate['failed_rows'] > 0 ) {
 			return 'failed';
@@ -237,8 +283,11 @@ final class Batch_Migrator {
 		if ( (int) $candidate['incomplete_target_rows'] > 0 ) {
 			return 'incomplete_targets';
 		}
-		if ( $row_count > 0 && (int) $candidate['resolved_rows'] === $row_count ) {
+		if ( $this->is_candidate_eligible( $candidate ) ) {
 			return 'eligible';
+		}
+		if ( (int) $candidate['collision_rows'] > 0 ) {
+			return 'blocked_collision';
 		}
 
 		return 'other_ineligible';
@@ -253,7 +302,14 @@ final class Batch_Migrator {
 			'eligible_attachments'          => 0,
 			'would_migrate_attachments'     => 0,
 			'migrated_attachments'          => 0,
+			'attachments_fully_eligible'    => 0,
+			'attachments_eligible_with_adopted_sizes' => 0,
+			'attachments_eligible_with_omitted_sizes' => 0,
+			'adopted_size_rows'             => 0,
+			'omitted_size_rows'             => 0,
+			'adopted_hash_mismatch_warnings' => 0,
 			'skipped_missing'               => 0,
+			'skipped_main_collision'        => 0,
 			'skipped_blocked_collision'     => 0,
 			'skipped_already_migrated'      => 0,
 			'skipped_failed'                => 0,
@@ -285,5 +341,39 @@ final class Batch_Migrator {
 				)
 			);
 		}
+	}
+
+	/**
+	 * @param array<string, mixed> $candidate Attachment summary.
+	 * @return bool
+	 */
+	private function is_candidate_eligible( array $candidate ) {
+		if ( $this->is_already_migrated_candidate( $candidate ) ) {
+			return false;
+		}
+
+		return 1 === (int) $candidate['main_rows']
+			&& 0 === (int) $candidate['main_collision_rows']
+			&& 0 === (int) $candidate['non_image_collision_rows']
+			&& 0 === (int) $candidate['main_missing_rows']
+			&& 0 === (int) $candidate['main_failed_rows']
+			&& ( (int) $candidate['main_resolved_rows'] + (int) $candidate['main_migrated_rows'] ) >= 1
+			&& 0 === (int) $candidate['failed_rows']
+			&& 0 === (int) $candidate['missing_rows']
+			&& 0 === (int) $candidate['incomplete_target_rows'];
+	}
+
+	/**
+	 * @param array<string, mixed> $candidate Attachment summary.
+	 * @return bool
+	 */
+	private function is_already_migrated_candidate( array $candidate ) {
+		$completed_rows = (int) $candidate['migrated_rows']
+			+ (int) $candidate['adopted_rows']
+			+ (int) $candidate['omitted_rows'];
+
+		return (int) $candidate['row_count'] > 0
+			&& $completed_rows === (int) $candidate['row_count']
+			&& (int) $candidate['main_migrated_rows'] === 1;
 	}
 }

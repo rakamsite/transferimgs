@@ -316,13 +316,15 @@ final class Redirect_Export_Service {
 		);
 
 		do {
-			$rows = $this->repository->get_migrated_rows( $after_id, $batch_size );
+			$rows = $this->repository->get_redirect_export_rows( $after_id, $batch_size );
 			foreach ( $rows as $row ) {
 				$after_id = (int) $row['id'];
 				$stats['total_migrated_mappings']++;
 
 				$old_url = trim( (string) $row['old_url'] );
-				$new_url = trim( (string) $row['new_url'] );
+				$new_url = 'omitted_size_collision' === (string) $row['status']
+					? trim( (string) $row['main_new_url'] )
+					: trim( (string) $row['new_url'] );
 				if ( '' === $old_url || '' === $new_url ) {
 					$errors[] = sprintf( 'Migrated manifest row %d is missing a URL mapping.', $row['id'] );
 					continue;
@@ -367,7 +369,9 @@ final class Redirect_Export_Service {
 					'size_key'            => '' === (string) $row['size_key'] ? '' : (string) $row['size_key'],
 					'status'              => (string) $row['status'],
 					'old_rel_path'        => (string) $row['old_rel_path'],
-					'new_rel_path'        => (string) $row['new_rel_path'],
+					'new_rel_path'        => 'omitted_size_collision' === (string) $row['status']
+						? (string) $row['main_new_rel_path']
+						: (string) $row['new_rel_path'],
 					'old_url'             => $old_url,
 					'new_url'             => $new_url,
 					'old_path_for_redirect' => $old_path,

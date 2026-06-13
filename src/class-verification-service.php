@@ -279,8 +279,12 @@ final class Verification_Service {
 			$old_md5      = @md5_file( $row['old_abs_path'] );
 			$new_md5      = @md5_file( $row['new_abs_path'] );
 			if ( ! $size_matches || false === $old_md5 || false === $new_md5 || $old_md5 !== $new_md5 ) {
-				++$result['integrity_mismatches'];
-				$this->error( $result, sprintf( 'File integrity mismatch for manifest row %d.', $row['id'] ) );
+				if ( 'adopted_root_size' === (string) $row['status'] ) {
+					$this->warning( $result, sprintf( 'Adopted root size row %d differs from the original derivative and was kept by policy.', $row['id'] ) );
+				} else {
+					++$result['integrity_mismatches'];
+					$this->error( $result, sprintf( 'File integrity mismatch for manifest row %d.', $row['id'] ) );
+				}
 			} else {
 				$this->info( $result, sprintf( 'Old source remains available for manifest row %d.', $row['id'] ) );
 			}
@@ -322,9 +326,26 @@ final class Verification_Service {
 			if ( ! is_array( $metadata ) ) {
 				continue;
 			}
+			$metadata_sizes = ! empty( $metadata['sizes'] ) && is_array( $metadata['sizes'] ) ? $metadata['sizes'] : array();
+			if ( (string) ( $metadata['file'] ?? '' ) !== (string) $main['new_rel_path'] ) {
+				$this->metadata_error( $result, sprintf( 'Attachment %d metadata file does not match the migrated main target.', $attachment_id ) );
+			}
 			if ( ! empty( $metadata['file'] ) && ( preg_match( '~^[0-9]{4}/[0-9]{2}/~', $metadata['file'] ) || false !== strpos( $metadata['file'], '/' ) ) ) {
 				$this->metadata_error( $result, sprintf( 'Attachment %d metadata file is not root-level.', $attachment_id ) );
 			}
+			$image_rows         = array();
+			$omitted_image_rows = array();
+			foreach ( $rows as $row ) {
+				if ( 'image_size' !== $row['file_kind'] ) {
+					continue;
+				}
+				if ( in_array( $row['status'], array( 'migrated', 'adopted_root_size' ), true ) ) {
+					$image_rows[ (string) $row['size_key'] ] = $row;
+				} elseif ( 'omitted_size_collision' === $row['status'] ) {
+					$omitted_image_rows[ (string) $row['size_key'] ] = $row;
+				}
+			}
+
 			foreach ( array( 'sizes', 'backup_sizes' ) as $group ) {
 				if ( empty( $metadata[ $group ] ) || ! is_array( $metadata[ $group ] ) ) {
 					continue;
@@ -333,6 +354,28 @@ final class Verification_Service {
 					if ( ! empty( $item['file'] ) && false !== strpos( str_replace( '\\', '/', $item['file'] ), '/' ) ) {
 						$this->metadata_error( $result, sprintf( 'Attachment %d %s filename %s contains a path.', $attachment_id, $group, $key ) );
 					}
+					if ( 'sizes' === $group ) {
+						if ( isset( $omitted_image_rows[ $key ] ) ) {
+							$this->metadata_error( $result, sprintf( 'Attachment %d metadata still references omitted collision size %s.', $attachment_id, $key ) );
+							continue;
+						}
+						if ( isset( $image_rows[ $key ] ) ) {
+							$expected_file = $this->exact_basename( $image_rows[ $key ]['new_rel_path'] );
+							if ( (string) ( $item['file'] ?? '' ) !== $expected_file ) {
+								$this->metadata_error( $result, sprintf( 'Attachment %d metadata size %s does not match its migrated or adopted target.', $attachment_id, $key ) );
+							}
+						}
+					}
+				}
+			}
+			foreach ( $image_rows as $size_key => $row ) {
+				if ( empty( $metadata_sizes[ $size_key ]['file'] ) ) {
+					$this->metadata_error( $result, sprintf( 'Attachment %d metadata is missing migrated or adopted size %s.', $attachment_id, $size_key ) );
+				}
+			}
+			foreach ( array_keys( $omitted_image_rows ) as $size_key ) {
+				if ( ! empty( $metadata['sizes'][ $size_key ] ) ) {
+					$this->metadata_error( $result, sprintf( 'Attachment %d metadata still contains omitted size %s.', $attachment_id, $size_key ) );
 				}
 			}
 			if ( ! empty( $metadata['original_image'] ) && false !== strpos( str_replace( '\\', '/', $metadata['original_image'] ), '/' ) ) {

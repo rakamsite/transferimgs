@@ -226,13 +226,19 @@ final class CLI_Command {
 			\WP_CLI::log( 'Manifest source and target files:' );
 			$this->format_items(
 				$plan['files'],
-				array( 'row_id', 'file_kind', 'size_key', 'source_path', 'target_path', 'source_exists', 'target_exists', 'same_path' )
+				array( 'row_id', 'file_kind', 'size_key', 'status', 'action', 'note', 'source_path', 'target_path', 'source_exists', 'target_exists', 'same_path' )
 			);
 
 			if ( $plan['errors'] ) {
 				\WP_CLI::log( 'Migration blockers:' );
 				foreach ( $plan['errors'] as $error ) {
 					\WP_CLI::warning( $error );
+				}
+			}
+			if ( ! empty( $plan['warnings'] ) ) {
+				\WP_CLI::log( 'Migration warnings:' );
+				foreach ( $plan['warnings'] as $warning ) {
+					\WP_CLI::warning( $warning );
 				}
 			}
 
@@ -252,10 +258,12 @@ final class CLI_Command {
 			$result = $migrator->migrate( $plan );
 			\WP_CLI::success(
 				sprintf(
-					'Attachment %d migrated successfully. Copied %d files and migrated %d manifest rows.',
+					'Attachment %d migrated successfully. Copied %d files, migrated %d rows, adopted %d root sizes, and omitted %d colliding sizes.',
 					$attachment_id,
 					$result['copied'],
-					$result['migrated']
+					$result['migrated'],
+					$result['adopted'],
+					$result['omitted']
 				)
 			);
 		} catch ( \RuntimeException $exception ) {

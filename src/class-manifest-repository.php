@@ -172,7 +172,7 @@ final class Manifest_Repository {
 			"SELECT id, attachment_id, old_rel_path, new_rel_path, old_url, new_url,
 				old_abs_path, new_abs_path, file_kind, size_key, status
 			FROM {$this->table_name}
-			WHERE status = 'migrated' AND id > %d
+			WHERE status IN ('migrated', 'adopted_root_size') AND id > %d
 			ORDER BY id ASC
 			LIMIT %d",
 			(int) $after_id,
@@ -193,7 +193,7 @@ final class Manifest_Repository {
 		$sql = $this->wpdb->prepare(
 			"SELECT DISTINCT attachment_id
 			FROM {$this->table_name}
-			WHERE status = 'migrated' AND attachment_id > %d
+			WHERE status IN ('migrated', 'adopted_root_size', 'omitted_size_collision') AND attachment_id > %d
 			ORDER BY attachment_id ASC
 			LIMIT %d",
 			(int) $after_id,
@@ -212,13 +212,18 @@ final class Manifest_Repository {
 	 */
 	public function get_deletion_rows( $after_id, $limit ) {
 		$sql = $this->wpdb->prepare(
-			"SELECT id, attachment_id, old_rel_path, old_abs_path, new_rel_path, new_abs_path,
-				old_url, new_url, file_kind, size_key, status, old_deleted_at, old_delete_status, old_delete_error
-			FROM {$this->table_name}
-			WHERE status = 'migrated'
-				AND ( old_delete_status IS NULL OR old_delete_status = '' )
-				AND id > %d
-			ORDER BY id ASC
+			"SELECT m.id, m.attachment_id, m.old_rel_path, m.old_abs_path, m.new_rel_path, m.new_abs_path,
+				m.old_url, m.new_url, m.file_kind, m.size_key, m.status, m.old_deleted_at, m.old_delete_status, m.old_delete_error,
+				main_row.new_abs_path AS main_new_abs_path, main_row.new_rel_path AS main_new_rel_path
+			FROM {$this->table_name} m
+			LEFT JOIN {$this->table_name} main_row
+				ON main_row.attachment_id = m.attachment_id
+				AND main_row.file_kind = 'main'
+				AND main_row.status = 'migrated'
+			WHERE m.status IN ('migrated', 'adopted_root_size', 'omitted_size_collision')
+				AND ( m.old_delete_status IS NULL OR m.old_delete_status = '' )
+				AND m.id > %d
+			ORDER BY m.id ASC
 			LIMIT %d",
 			(int) $after_id,
 			max( 1, (int) $limit )
@@ -240,7 +245,7 @@ final class Manifest_Repository {
 		return (int) $this->wpdb->get_var(
 			"SELECT COUNT(*)
 			FROM {$this->table_name}
-			WHERE status = 'migrated'
+			WHERE status IN ('migrated', 'adopted_root_size', 'omitted_size_collision')
 				AND ( old_delete_status IS NULL OR old_delete_status = '' )"
 		);
 	}
@@ -258,7 +263,7 @@ final class Manifest_Repository {
 		return (int) $this->wpdb->get_var(
 			"SELECT COUNT(*)
 			FROM {$this->table_name}
-			WHERE status = 'migrated'
+			WHERE status IN ('migrated', 'adopted_root_size', 'omitted_size_collision')
 				AND old_delete_status = 'deleted'"
 		);
 	}
@@ -276,7 +281,7 @@ final class Manifest_Repository {
 		return (int) $this->wpdb->get_var(
 			"SELECT COUNT(*)
 			FROM {$this->table_name}
-			WHERE status = 'migrated'
+			WHERE status IN ('migrated', 'adopted_root_size', 'omitted_size_collision')
 				AND old_delete_status = 'already_missing'"
 		);
 	}
@@ -294,7 +299,7 @@ final class Manifest_Repository {
 		return (int) $this->wpdb->get_var(
 			"SELECT COUNT(*)
 			FROM {$this->table_name}
-			WHERE status = 'migrated'
+			WHERE status IN ('migrated', 'adopted_root_size', 'omitted_size_collision')
 				AND old_delete_status = 'failed'"
 		);
 	}
@@ -334,7 +339,9 @@ final class Manifest_Repository {
 			return 0;
 		}
 
-		return (int) $this->wpdb->get_var( "SELECT COUNT(*) FROM {$this->table_name} WHERE status = 'migrated'" );
+		return (int) $this->wpdb->get_var(
+			"SELECT COUNT(*) FROM {$this->table_name} WHERE status IN ('migrated', 'adopted_root_size', 'omitted_size_collision')"
+		);
 	}
 
 	/** @return int */
@@ -344,7 +351,9 @@ final class Manifest_Repository {
 		}
 
 		return (int) $this->wpdb->get_var(
-			"SELECT COUNT(DISTINCT attachment_id) FROM {$this->table_name} WHERE status = 'migrated'"
+			"SELECT COUNT(DISTINCT attachment_id)
+			FROM {$this->table_name}
+			WHERE status IN ('migrated', 'adopted_root_size', 'omitted_size_collision')"
 		);
 	}
 
@@ -404,6 +413,8 @@ final class Manifest_Repository {
 			'copying'           => 0,
 			'copied'            => 0,
 			'migrated'          => 0,
+			'adopted_root_size' => 0,
+			'omitted_size_collision' => 0,
 			'failed'            => 0,
 		);
 
@@ -458,6 +469,16 @@ final class Manifest_Repository {
 				SUM(status = 'blocked_collision') AS collision_rows,
 				SUM(status = 'failed') AS failed_rows,
 				SUM(status = 'migrated') AS migrated_rows,
+				SUM(status = 'adopted_root_size') AS adopted_rows,
+				SUM(status = 'omitted_size_collision') AS omitted_rows,
+				SUM(file_kind = 'main') AS main_rows,
+				SUM(file_kind = 'main' AND status = 'resolved') AS main_resolved_rows,
+				SUM(file_kind = 'main' AND status = 'missing') AS main_missing_rows,
+				SUM(file_kind = 'main' AND status = 'blocked_collision') AS main_collision_rows,
+				SUM(file_kind = 'main' AND status = 'failed') AS main_failed_rows,
+				SUM(file_kind = 'main' AND status = 'migrated') AS main_migrated_rows,
+				SUM(file_kind = 'image_size' AND status = 'blocked_collision') AS image_collision_rows,
+				SUM(file_kind <> 'image_size' AND status = 'blocked_collision') AS non_image_collision_rows,
 				SUM(new_rel_path IS NULL OR new_rel_path = ''
 					OR new_abs_path IS NULL OR new_abs_path = ''
 					OR new_url IS NULL OR new_url = '') AS incomplete_target_rows
@@ -479,15 +500,58 @@ final class Manifest_Repository {
 	 * @return array<int, array<string, string>>
 	 */
 	public function get_migrated_url_mappings() {
-		$sql = "SELECT id, old_url, new_url
-			FROM {$this->table_name}
-			WHERE status = 'migrated'
-				AND old_url IS NOT NULL
-				AND old_url <> ''
-				AND new_url IS NOT NULL
-				AND new_url <> ''
-				AND old_url <> new_url
-			ORDER BY id ASC";
+		$sql = "SELECT m.id, m.old_url,
+				CASE
+					WHEN m.status = 'omitted_size_collision' THEN main_row.new_url
+					ELSE m.new_url
+				END AS new_url
+			FROM {$this->table_name} m
+			LEFT JOIN {$this->table_name} main_row
+				ON main_row.attachment_id = m.attachment_id
+				AND main_row.file_kind = 'main'
+				AND main_row.status = 'migrated'
+			WHERE m.status IN ('migrated', 'adopted_root_size', 'omitted_size_collision')
+				AND m.old_url IS NOT NULL
+				AND m.old_url <> ''
+				AND (
+					( m.status <> 'omitted_size_collision' AND m.new_url IS NOT NULL AND m.new_url <> '' )
+					OR
+					( m.status = 'omitted_size_collision' AND main_row.new_url IS NOT NULL AND main_row.new_url <> '' )
+				)
+				AND m.old_url <> CASE
+					WHEN m.status = 'omitted_size_collision' THEN main_row.new_url
+					ELSE m.new_url
+				END
+			ORDER BY m.id ASC";
+
+		return $this->wpdb->get_results( $sql, ARRAY_A );
+	}
+
+	/**
+	 * Return redirect-export rows, including omitted sizes that fall back to the main file URL.
+	 *
+	 * @param int $after_id Only return IDs greater than this value.
+	 * @param int $limit    Maximum rows to return.
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function get_redirect_export_rows( $after_id, $limit ) {
+		$sql = $this->wpdb->prepare(
+			"SELECT m.id, m.attachment_id, m.old_rel_path, m.new_rel_path, m.old_url, m.new_url,
+				m.old_abs_path, m.new_abs_path, m.file_kind, m.size_key, m.status,
+				main_row.new_rel_path AS main_new_rel_path,
+				main_row.new_url AS main_new_url
+			FROM {$this->table_name} m
+			LEFT JOIN {$this->table_name} main_row
+				ON main_row.attachment_id = m.attachment_id
+				AND main_row.file_kind = 'main'
+				AND main_row.status = 'migrated'
+			WHERE m.status IN ('migrated', 'adopted_root_size', 'omitted_size_collision')
+				AND m.id > %d
+			ORDER BY m.id ASC
+			LIMIT %d",
+			(int) $after_id,
+			max( 1, (int) $limit )
+		);
 
 		return $this->wpdb->get_results( $sql, ARRAY_A );
 	}
@@ -535,9 +599,24 @@ final class Manifest_Repository {
 		}
 
 		return (int) $this->wpdb->get_var(
-			"SELECT COUNT(*) FROM {$this->table_name}
-			WHERE status = 'migrated'
-				AND ( old_url IS NULL OR old_url = '' OR new_url IS NULL OR new_url = '' )"
+			"SELECT COUNT(*) FROM {$this->table_name} m
+			LEFT JOIN {$this->table_name} main_row
+				ON main_row.attachment_id = m.attachment_id
+				AND main_row.file_kind = 'main'
+				AND main_row.status = 'migrated'
+			WHERE m.status IN ('migrated', 'adopted_root_size', 'omitted_size_collision')
+				AND (
+					m.old_url IS NULL
+					OR m.old_url = ''
+					OR (
+						m.status = 'omitted_size_collision'
+						AND ( main_row.new_url IS NULL OR main_row.new_url = '' )
+					)
+					OR (
+						m.status <> 'omitted_size_collision'
+						AND ( m.new_url IS NULL OR m.new_url = '' )
+					)
+				)"
 		);
 	}
 

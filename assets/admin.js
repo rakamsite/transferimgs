@@ -203,6 +203,7 @@
 			var cleanupReport = report.cleanup_result || {};
 			var cleanupReadiness = report.cleanup_readiness || {};
 			var finalReport = report.final_report || {};
+			var batchMigration = report.batch_migration || {};
 			var redirectPreviewStatus = report.redirect_preview_status || {};
 			var redirectExportStatus = report.redirect_export_status || {};
 			var deleteReady = Boolean(report.delete_old_files_ready || deleteReadiness.delete_old_files_ready || deleteReadiness.ready);
@@ -218,7 +219,12 @@
 				['Blocked collision', report.statuses.blocked_collision || 0],
 				['Resolved', report.statuses.resolved || 0],
 				['Migrated', report.statuses.migrated || 0],
+				['Adopted root sizes', report.statuses.adopted_root_size || 0],
+				['Omitted size collisions', report.statuses.omitted_size_collision || 0],
 				['Failed', report.statuses.failed || 0],
+				['Eligible attachments', batchMigration.eligible_attachments_ready || 0],
+				['Eligible partial attachments', batchMigration.eligible_attachments_partial || 0],
+				['Blocked by main collision', batchMigration.attachments_blocked_main_collision || 0],
 				['WebP', report.extensions.webp || 0],
 				['PNG', report.extensions.png || 0],
 				['JPG/JPEG', report.extensions['jpg/jpeg'] || 0],

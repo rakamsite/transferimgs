@@ -310,6 +310,9 @@ final class Admin_Controller {
 				}
 
 				$filename_counts = ( new Usage_Reporter( $repository ) )->filename_counts();
+				$batch_report    = $repository->table_exists()
+					? ( new Batch_Migrator( $repository, new Single_Attachment_Migrator( $repository ) ) )->report_counts()
+					: array();
 				$extensions      = array();
 				foreach ( $filename_counts['extensions'] as $row ) {
 					$extensions[ $row['extension'] ] = (int) $row['file_count'];
@@ -343,6 +346,7 @@ final class Admin_Controller {
 					'statuses'                => $statuses,
 					'extensions'              => $extensions,
 					'non_ascii'               => (int) $filename_counts['non_ascii_filenames'],
+					'batch_migration'         => $batch_report,
 					'job'                     => $job,
 					'lock_is_stale'           => $this->is_stale( $job ) || $this->batch_lock_is_stale(),
 					'verify'                  => $verify,
@@ -943,6 +947,7 @@ final class Admin_Controller {
 			$job['success_count']    += $dry_run ? $summary['would_migrate_attachments'] : $summary['migrated_attachments'];
 			$job['failed_count']     += $summary['failed_attachments'];
 			$job['skipped_count']    += $summary['skipped_missing']
+				+ $summary['skipped_main_collision']
 				+ $summary['skipped_blocked_collision']
 				+ $summary['skipped_already_migrated']
 				+ $summary['skipped_failed']
