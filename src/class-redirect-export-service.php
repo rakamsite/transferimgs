@@ -63,13 +63,17 @@ final class Redirect_Export_Service {
 		}
 
 		$duplicate_groups = $this->repository->get_duplicate_logical_groups();
+		$preview_state    = isset( $state['preview'] ) && is_array( $state['preview'] ) ? $state['preview'] : array();
+		$export_states    = isset( $state['exports'] ) && is_array( $state['exports'] ) ? $state['exports'] : array();
+		$preview_summary  = $this->preview_status( $preview_state );
+		$export_summary   = $this->export_status( $export_states );
 		$redirect_conflicts = array();
-		if ( ! empty( $state['latest_preview']['duplicate_conflicts'] ) && is_array( $state['latest_preview']['duplicate_conflicts'] ) ) {
-			$redirect_conflicts = $state['latest_preview']['duplicate_conflicts'];
+		if ( ! empty( $preview_state['duplicate_conflicts'] ) && is_array( $preview_state['duplicate_conflicts'] ) ) {
+			$redirect_conflicts = $preview_state['duplicate_conflicts'];
 		} else {
 			foreach ( array( 'apache', 'nginx', 'csv' ) as $format ) {
-				if ( ! empty( $state['exports'][ $format ]['duplicate_conflicts'] ) && is_array( $state['exports'][ $format ]['duplicate_conflicts'] ) ) {
-					$redirect_conflicts = $state['exports'][ $format ]['duplicate_conflicts'];
+				if ( ! empty( $export_states[ $format ]['duplicate_conflicts'] ) && is_array( $export_states[ $format ]['duplicate_conflicts'] ) ) {
+					$redirect_conflicts = $export_states[ $format ]['duplicate_conflicts'];
 					break;
 				}
 			}
@@ -113,10 +117,15 @@ final class Redirect_Export_Service {
 			'status_counts'                 => $statuses,
 			'duplicate_manifest_rows'       => count( $duplicate_groups ),
 			'redirect_path_conflicts'       => count( $redirect_conflicts ),
+			'redirect_preview_status'       => $preview_summary,
+			'redirect_export_status'        => $export_summary,
+			'redirect_preview_ready'        => ! empty( $preview_summary['ready'] ),
+			'redirect_preview_has_run'      => ! empty( $preview_summary['has_run'] ),
+			'redirect_export_has_run'       => ! empty( $export_summary['has_run'] ),
 			'redirect_export_ready'         => $ready,
 			'warnings'                      => $warnings,
 			'migrated_rows_available'       => $this->repository->count_migrated_rows(),
-			'redirect_rules_to_export'      => (int) ( $state['latest_preview']['redirect_rule_count'] ?? 0 ),
+			'redirect_rules_to_export'      => (int) ( $preview_state['redirect_rule_count'] ?? $export_summary['redirect_rule_count'] ?? 0 ),
 			'export_warnings_count'         => 0,
 			'export_errors_count'           => 0,
 			'latest_exports'                => $this->latest_exports(),
@@ -132,7 +141,7 @@ final class Redirect_Export_Service {
 	 * @return array<string, mixed>
 	 */
 	public function preview( $sample_limit = self::SAMPLE_LIMIT, $store = false ) {
-		$built = $this->build_mappings( max( 1, (int) $sample_limit ), false );
+		$built = $this->build_mappings( 500, false, max( 1, (int) $sample_limit ) );
 		$built['readiness'] = $this->readiness();
 		$built['ready']     = $built['readiness']['ready'] && empty( $built['duplicate_conflicts'] );
 		if ( $store ) {
@@ -156,7 +165,10 @@ final class Redirect_Export_Service {
 			throw new \InvalidArgumentException( 'Unknown redirect export format.' );
 		}
 
-		$built = $this->build_mappings( max( 1, (int) $batch_size ), true );
+		$built = $this->build_mappings( max( 1, (int) $batch_size ), true, self::SAMPLE_LIMIT );
+		if ( ! empty( $built['errors'] ) ) {
+			throw new \RuntimeException( 'Redirect export cannot be generated until mapping errors are resolved: ' . implode( ' ', $built['errors'] ) );
+		}
 		if ( ! empty( $built['duplicate_conflicts'] ) ) {
 			throw new \RuntimeException( 'Conflicting redirect mappings were found. Resolve duplicate old-path targets before exporting.' );
 		}
@@ -276,8 +288,9 @@ final class Redirect_Export_Service {
 	 * @param bool $for_export  Whether the caller intends to generate a file.
 	 * @return array<string, mixed>
 	 */
-	private function build_mappings( $batch_size, $for_export ) {
+	private function build_mappings( $batch_size, $for_export, $sample_limit = self::SAMPLE_LIMIT ) {
 		$batch_size = max( 1, (int) $batch_size );
+		$sample_limit = max( 0, (int) $sample_limit );
 		$after_id   = 0;
 		$seen       = array();
 		$records    = array();
@@ -365,7 +378,7 @@ final class Redirect_Export_Service {
 				if ( ! isset( $seen[ $old_path ] ) ) {
 					$seen[ $old_path ] = $record;
 					$records[]         = $record;
-					if ( count( $samples ) < self::SAMPLE_LIMIT ) {
+					if ( count( $samples ) < $sample_limit ) {
 						$samples[] = $record;
 					}
 					++$stats['redirect_rule_count'];
@@ -573,15 +586,6 @@ final class Redirect_Export_Service {
 		$state['ready']                   = $this->readiness()['ready'];
 		$state['warnings']                = $export['warnings'];
 		$state['errors']                  = $export['errors'];
-		$state['latest_preview']          = array(
-			'redirect_rule_count'    => $export['redirect_rule_count'],
-			'total_migrated_mappings'=> $export['total_migrated_mappings'],
-			'deduplicated_mappings'  => $export['deduplicated_mappings'],
-			'skipped_same_path'      => $export['skipped_same_path'],
-			'duplicate_conflicts'     => $export['duplicate_conflicts'],
-			'extension_counts'       => $export['extension_counts'],
-			'unicode_filename_count' => $export['unicode_filename_count'],
-		);
 		$state['exports'][ $format ]   = array(
 			'format'                 => $format,
 			'generated_at'           => $export['generated_at'],
@@ -592,6 +596,22 @@ final class Redirect_Export_Service {
 			'total_migrated_mappings'=> $export['total_migrated_mappings'],
 			'deduplicated_mappings'  => $export['deduplicated_mappings'],
 			'skipped_same_path'      => $export['skipped_same_path'],
+			'duplicate_conflicts'    => $export['duplicate_conflicts'],
+			'status'                 => empty( $export['errors'] ) && empty( $export['duplicate_conflicts'] ) ? 'pass' : 'fail',
+			'preview'                => array(
+				'generated_at'            => $export['generated_at'],
+				'ready'                   => empty( $export['errors'] ) && empty( $export['duplicate_conflicts'] ),
+				'status'                  => empty( $export['errors'] ) && empty( $export['duplicate_conflicts'] ) ? 'pass' : 'fail',
+				'redirect_rule_count'     => $export['redirect_rule_count'],
+				'total_migrated_mappings' => $export['total_migrated_mappings'],
+				'deduplicated_mappings'   => $export['deduplicated_mappings'],
+				'skipped_same_path'       => $export['skipped_same_path'],
+				'duplicate_conflicts'     => $export['duplicate_conflicts'],
+				'extension_counts'        => $export['extension_counts'],
+				'unicode_filename_count'  => $export['unicode_filename_count'],
+				'warnings'                => $export['warnings'],
+				'errors'                  => $export['errors'],
+			),
 			'extension_counts'       => $export['extension_counts'],
 			'unicode_filename_count' => $export['unicode_filename_count'],
 			'warnings'               => $export['warnings'],
@@ -620,7 +640,24 @@ final class Redirect_Export_Service {
 		$state['ready']          = ! empty( $preview['ready'] );
 		$state['warnings']       = $preview['warnings'];
 		$state['errors']         = $preview['errors'];
+		$state['preview']        = array(
+			'generated_at'           => $preview['generated_at'] ?? current_time( 'mysql' ),
+			'ready'                  => ! empty( $preview['ready'] ),
+			'status'                 => ! empty( $preview['ready'] ) ? 'pass' : 'fail',
+			'redirect_rule_count'    => $preview['redirect_rule_count'],
+			'total_migrated_mappings'=> $preview['total_migrated_mappings'],
+			'deduplicated_mappings'  => $preview['deduplicated_mappings'],
+			'skipped_same_path'      => $preview['skipped_same_path'],
+			'duplicate_conflicts'    => $preview['duplicate_conflicts'],
+			'extension_counts'       => $preview['extension_counts'],
+			'unicode_filename_count' => $preview['unicode_filename_count'],
+			'warnings'               => $preview['warnings'],
+			'errors'                 => $preview['errors'],
+		);
 		$state['latest_preview'] = array(
+			'generated_at'            => $preview['generated_at'] ?? current_time( 'mysql' ),
+			'ready'                   => ! empty( $preview['ready'] ),
+			'status'                  => ! empty( $preview['ready'] ) ? 'pass' : 'fail',
 			'redirect_rule_count'     => $preview['redirect_rule_count'],
 			'total_migrated_mappings' => $preview['total_migrated_mappings'],
 			'deduplicated_mappings'   => $preview['deduplicated_mappings'],
@@ -641,6 +678,84 @@ final class Redirect_Export_Service {
 	private function latest_exports() {
 		$state = $this->state();
 		return isset( $state['exports'] ) && is_array( $state['exports'] ) ? $state['exports'] : array();
+	}
+
+	/**
+	 * Summarize the latest redirect preview state.
+	 *
+	 * @param array<string, mixed> $preview_state Preview state.
+	 * @return array<string, mixed>
+	 */
+	private function preview_status( array $preview_state ) {
+		if ( empty( $preview_state ) ) {
+			return array(
+				'has_run'    => false,
+				'ready'      => false,
+				'status'     => 'not_run',
+				'label'      => 'Preview not run yet.',
+				'generated_at' => null,
+			);
+		}
+
+		$ready = empty( $preview_state['errors'] ) && empty( $preview_state['duplicate_conflicts'] );
+		return array(
+			'has_run'       => true,
+			'ready'         => $ready,
+			'status'        => $ready ? 'pass' : 'fail',
+			'label'         => $ready ? 'Preview passed.' : 'Preview failed.',
+			'generated_at'  => $preview_state['generated_at'] ?? null,
+			'redirect_rule_count' => (int) ( $preview_state['redirect_rule_count'] ?? 0 ),
+			'warnings'      => isset( $preview_state['warnings'] ) && is_array( $preview_state['warnings'] ) ? $preview_state['warnings'] : array(),
+			'errors'        => isset( $preview_state['errors'] ) && is_array( $preview_state['errors'] ) ? $preview_state['errors'] : array(),
+		);
+	}
+
+	/**
+	 * Summarize the latest redirect export states.
+	 *
+	 * @param array<string, array<string, mixed>> $export_states Export states.
+	 * @return array<string, mixed>
+	 */
+	private function export_status( array $export_states ) {
+		$latest = array();
+		foreach ( $export_states as $format => $export ) {
+			if ( ! is_array( $export ) ) {
+				continue;
+			}
+			if ( empty( $latest ) ) {
+				$latest = $export + array( 'format' => $format );
+				continue;
+			}
+			$latest_time = strtotime( (string) ( $latest['generated_at'] ?? '' ) ) ?: 0;
+			$export_time = strtotime( (string) ( $export['generated_at'] ?? '' ) ) ?: 0;
+			if ( $export_time >= $latest_time ) {
+				$latest = $export + array( 'format' => $format );
+			}
+		}
+
+		if ( empty( $latest ) ) {
+			return array(
+				'has_run'    => false,
+				'ready'      => false,
+				'status'     => 'not_run',
+				'label'      => 'Final redirect export not run yet.',
+				'generated_at' => null,
+			);
+		}
+
+		$ready = empty( $latest['errors'] ) && empty( $latest['duplicate_conflicts'] );
+		return array(
+			'has_run'       => true,
+			'ready'         => $ready,
+			'status'        => $ready ? 'pass' : 'fail',
+			'label'         => $ready ? 'Final redirect export passed.' : 'Final redirect export failed.',
+			'generated_at'  => $latest['generated_at'] ?? null,
+			'format'        => $latest['format'] ?? null,
+			'file_name'     => $latest['file_name'] ?? null,
+			'redirect_rule_count' => (int) ( $latest['redirect_rule_count'] ?? 0 ),
+			'warnings'      => isset( $latest['warnings'] ) && is_array( $latest['warnings'] ) ? $latest['warnings'] : array(),
+			'errors'        => isset( $latest['errors'] ) && is_array( $latest['errors'] ) ? $latest['errors'] : array(),
+		);
 	}
 
 	/**

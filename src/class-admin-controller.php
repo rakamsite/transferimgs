@@ -172,9 +172,9 @@ final class Admin_Controller {
 					<button class="button" data-mfm-redirect-action="csv">Generate CSV Mapping File</button>
 				</p>
 				<p>
-					<a class="button" href="<?php echo esc_url( $this->download_redirect_url( 'apache' ) ); ?>">Download Latest Apache File</a>
-					<a class="button" href="<?php echo esc_url( $this->download_redirect_url( 'nginx' ) ); ?>">Download Latest Nginx File</a>
-					<a class="button" href="<?php echo esc_url( $this->download_redirect_url( 'csv' ) ); ?>">Download Latest CSV File</a>
+					<a class="button" data-mfm-download-format="apache" data-mfm-download-href="<?php echo esc_url( $this->download_redirect_url( 'apache' ) ); ?>" href="<?php echo esc_url( $this->download_redirect_url( 'apache' ) ); ?>">Download Latest Apache File</a>
+					<a class="button" data-mfm-download-format="nginx" data-mfm-download-href="<?php echo esc_url( $this->download_redirect_url( 'nginx' ) ); ?>" href="<?php echo esc_url( $this->download_redirect_url( 'nginx' ) ); ?>">Download Latest Nginx File</a>
+					<a class="button" data-mfm-download-format="csv" data-mfm-download-href="<?php echo esc_url( $this->download_redirect_url( 'csv' ) ); ?>" href="<?php echo esc_url( $this->download_redirect_url( 'csv' ) ); ?>">Download Latest CSV File</a>
 				</p>
 				<div id="mfm-redirect-status" class="mfm-verify-status">Not run yet.</div>
 				<pre id="mfm-redirect-result">No redirect export preview stored.</pre>
@@ -243,23 +243,29 @@ final class Admin_Controller {
 				$verify = get_option( self::VERIFY_RESULT_OPTION, array() );
 				$audit = get_option( self::OLD_URL_AUDIT_RESULT_OPTION, array() );
 				$redirect_export = get_option( self::REDIRECT_EXPORT_RESULT_OPTION, array() );
-				$redirect_export_ready = false;
+				$redirect_service = null;
+				$redirect_readiness = array();
 				if ( $repository->table_exists() ) {
-					$redirect_export_ready = ! empty( ( new Redirect_Export_Service( $repository ) )->readiness()['ready'] );
+					$redirect_service   = new Redirect_Export_Service( $repository );
+					$redirect_readiness = $redirect_service->readiness();
 				}
 
 				return array(
-					'table_exists'  => $repository->table_exists(),
-					'total_rows'    => $repository->count_rows(),
-					'statuses'      => $statuses,
-					'extensions'    => $extensions,
-					'non_ascii'     => (int) $filename_counts['non_ascii_filenames'],
-					'job'           => $job,
-					'lock_is_stale' => $this->is_stale( $job ) || $this->batch_lock_is_stale(),
-					'verify'        => $verify,
-					'old_url_audit' => $audit,
-					'redirect_export' => $redirect_export,
-					'redirect_export_ready' => $redirect_export_ready,
+					'table_exists'            => $repository->table_exists(),
+					'total_rows'              => $repository->count_rows(),
+					'statuses'                => $statuses,
+					'extensions'              => $extensions,
+					'non_ascii'               => (int) $filename_counts['non_ascii_filenames'],
+					'job'                     => $job,
+					'lock_is_stale'           => $this->is_stale( $job ) || $this->batch_lock_is_stale(),
+					'verify'                  => $verify,
+					'old_url_audit'           => $audit,
+					'redirect_export'         => $redirect_export,
+					'redirect_preview_status' => $redirect_readiness['redirect_preview_status'] ?? array(),
+					'redirect_export_status'   => $redirect_readiness['redirect_export_status'] ?? array(),
+					'redirect_preview_ready'   => ! empty( $redirect_readiness['redirect_preview_ready'] ),
+					'redirect_export_ready'    => ! empty( $redirect_readiness['redirect_export_ready'] ),
+					'redirect_readiness'      => $redirect_readiness,
 				);
 			}
 		);
@@ -315,7 +321,10 @@ final class Admin_Controller {
 				$sample_limit = max( 1, min( 500, $sample_limit ) );
 				$service      = $this->redirect_export_service();
 				$result       = $service->preview( $sample_limit, true );
-				return array( 'result' => $result );
+				return array(
+					'result'    => $result,
+					'readiness' => $service->readiness(),
+				);
 			}
 		);
 	}
@@ -333,8 +342,9 @@ final class Admin_Controller {
 				$file    = trailingslashit( $dir ) . $service->build_filename( $format );
 				$result  = $service->generate( $format, $file, 500, true );
 				return array(
-					'result' => $result,
-					'state'  => get_option( self::REDIRECT_EXPORT_RESULT_OPTION, array() ),
+					'result'    => $result,
+					'state'     => get_option( self::REDIRECT_EXPORT_RESULT_OPTION, array() ),
+					'readiness' => $service->readiness(),
 				);
 			}
 		);
