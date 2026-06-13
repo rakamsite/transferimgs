@@ -9,6 +9,7 @@ final class Admin_Controller {
 	const BATCH_LOCK_OPTION = 'media_flatten_batch_lock';
 	const VERIFY_RESULT_OPTION = 'media_flatten_last_verify_result';
 	const OLD_URL_AUDIT_RESULT_OPTION = 'media_flatten_last_old_url_audit_result';
+	const REDIRECT_EXPORT_RESULT_OPTION = 'media_flatten_last_redirect_export_result';
 	const STALE_SECONDS   = 900;
 	const LOG_LIMIT       = 60;
 
@@ -51,6 +52,9 @@ final class Admin_Controller {
 		add_action( 'wp_ajax_media_flatten_start_old_url_audit', array( $this, 'ajax_start_old_url_audit' ) );
 		add_action( 'wp_ajax_media_flatten_run_old_url_audit_batch', array( $this, 'ajax_run_old_url_audit_batch' ) );
 		add_action( 'wp_ajax_media_flatten_get_old_url_audit_result', array( $this, 'ajax_get_old_url_audit_result' ) );
+		add_action( 'wp_ajax_media_flatten_preview_redirects', array( $this, 'ajax_preview_redirects' ) );
+		add_action( 'wp_ajax_media_flatten_generate_redirect_export', array( $this, 'ajax_generate_redirect_export' ) );
+		add_action( 'admin_post_media_flatten_download_redirect_export', array( $this, 'admin_post_download_redirect_export' ) );
 	}
 
 	/** @return void */
@@ -77,13 +81,13 @@ final class Admin_Controller {
 			'media-flatten-admin',
 			plugins_url( '../assets/admin.css', __FILE__ ),
 			array(),
-			'0.8.5'
+			'0.9.0'
 		);
 		wp_enqueue_script(
 			'media-flatten-admin',
 			plugins_url( '../assets/admin.js', __FILE__ ),
 			array(),
-			'0.8.5',
+			'0.9.0',
 			true
 		);
 		wp_localize_script(
@@ -159,6 +163,24 @@ final class Admin_Controller {
 			</section>
 
 			<section class="mfm-panel">
+				<h2>Redirect Export</h2>
+				<p>Preview and export exact mapping-based redirects from migrated manifest rows only. No files or database content are changed here.</p>
+				<p>
+					<button class="button button-primary" data-mfm-redirect-action="preview">Preview Redirects</button>
+					<button class="button" data-mfm-redirect-action="apache">Generate Apache Redirect File</button>
+					<button class="button" data-mfm-redirect-action="nginx">Generate Nginx Redirect File</button>
+					<button class="button" data-mfm-redirect-action="csv">Generate CSV Mapping File</button>
+				</p>
+				<p>
+					<a class="button" href="<?php echo esc_url( $this->download_redirect_url( 'apache' ) ); ?>">Download Latest Apache File</a>
+					<a class="button" href="<?php echo esc_url( $this->download_redirect_url( 'nginx' ) ); ?>">Download Latest Nginx File</a>
+					<a class="button" href="<?php echo esc_url( $this->download_redirect_url( 'csv' ) ); ?>">Download Latest CSV File</a>
+				</p>
+				<div id="mfm-redirect-status" class="mfm-verify-status">Not run yet.</div>
+				<pre id="mfm-redirect-result">No redirect export preview stored.</pre>
+			</section>
+
+			<section class="mfm-panel">
 				<h2>Current Job</h2>
 				<div class="mfm-progress"><span id="mfm-progress-bar"></span></div>
 				<p id="mfm-progress-text">No job running.</p>
@@ -220,14 +242,11 @@ final class Admin_Controller {
 				$job = get_option( self::JOB_OPTION, array() );
 				$verify = get_option( self::VERIFY_RESULT_OPTION, array() );
 				$audit = get_option( self::OLD_URL_AUDIT_RESULT_OPTION, array() );
-				$duplicate_groups = $repository->table_exists() ? $repository->get_duplicate_logical_groups() : array();
-				$redirect_export_ready = ! empty( $verify['redirect_export_ready'] )
-					&& ! empty( $audit['safe'] )
-					&& 0 === (int) $repository->count_invalid_migrated_url_rows()
-					&& empty( $statuses['copying'] )
-					&& empty( $statuses['copied'] )
-					&& empty( $statuses['failed'] )
-					&& empty( $duplicate_groups );
+				$redirect_export = get_option( self::REDIRECT_EXPORT_RESULT_OPTION, array() );
+				$redirect_export_ready = false;
+				if ( $repository->table_exists() ) {
+					$redirect_export_ready = ! empty( ( new Redirect_Export_Service( $repository ) )->readiness()['ready'] );
+				}
 
 				return array(
 					'table_exists'  => $repository->table_exists(),
@@ -239,6 +258,7 @@ final class Admin_Controller {
 					'lock_is_stale' => $this->is_stale( $job ) || $this->batch_lock_is_stale(),
 					'verify'        => $verify,
 					'old_url_audit' => $audit,
+					'redirect_export' => $redirect_export,
 					'redirect_export_ready' => $redirect_export_ready,
 				);
 			}
@@ -285,6 +305,77 @@ final class Admin_Controller {
 				return array( 'result' => get_option( self::OLD_URL_AUDIT_RESULT_OPTION, array() ) );
 			}
 		);
+	}
+
+	/** @return void */
+	public function ajax_preview_redirects() {
+		$this->ajax_guard(
+			function () {
+				$sample_limit = absint( $_POST['sample_limit'] ?? Redirect_Export_Service::SAMPLE_LIMIT );
+				$sample_limit = max( 1, min( 500, $sample_limit ) );
+				$service      = $this->redirect_export_service();
+				$result       = $service->preview( $sample_limit, true );
+				return array( 'result' => $result );
+			}
+		);
+	}
+
+	/** @return void */
+	public function ajax_generate_redirect_export() {
+		$this->ajax_guard(
+			function () {
+				$format  = sanitize_key( wp_unslash( $_POST['format'] ?? '' ) );
+				if ( ! in_array( $format, array( 'apache', 'nginx', 'csv' ), true ) ) {
+					throw new \InvalidArgumentException( 'Use apache, nginx, or csv as the redirect export format.' );
+				}
+				$service = $this->redirect_export_service();
+				$dir     = $service->ensure_exports_dir();
+				$file    = trailingslashit( $dir ) . $service->build_filename( $format );
+				$result  = $service->generate( $format, $file, 500, true );
+				return array(
+					'result' => $result,
+					'state'  => get_option( self::REDIRECT_EXPORT_RESULT_OPTION, array() ),
+				);
+			}
+		);
+	}
+
+	/** @return void */
+	public function admin_post_download_redirect_export() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to access this action.', 'media-flatten-migrator' ) );
+		}
+		if ( false === check_admin_referer( self::NONCE_ACTION ) ) {
+			wp_die( esc_html__( 'Security check failed.', 'media-flatten-migrator' ) );
+		}
+
+		$format  = sanitize_key( wp_unslash( $_GET['format'] ?? '' ) );
+		if ( ! in_array( $format, array( 'apache', 'nginx', 'csv' ), true ) ) {
+			wp_die( esc_html__( 'Unknown redirect export format.', 'media-flatten-migrator' ) );
+		}
+		$service = $this->redirect_export_service();
+		$latest  = $service->latest_export( $format );
+		if ( empty( $latest['file_path'] ) || ! file_exists( $latest['file_path'] ) ) {
+			wp_die( esc_html__( 'No generated export file is available for download.', 'media-flatten-migrator' ) );
+		}
+
+		$exports_dir = wp_normalize_path( trailingslashit( $service->ensure_exports_dir() ) );
+		$file_path   = wp_normalize_path( $latest['file_path'] );
+		if ( 0 !== strpos( $file_path, $exports_dir ) ) {
+			wp_die( esc_html__( 'The requested file is not inside the export directory.', 'media-flatten-migrator' ) );
+		}
+
+		$mime = 'text/plain; charset=utf-8';
+		if ( 'csv' === $format ) {
+			$mime = 'text/csv; charset=utf-8';
+		}
+
+		nocache_headers();
+		header( 'Content-Type: ' . $mime );
+		header( 'Content-Disposition: attachment; filename="' . basename( $file_path ) . '"' );
+		header( 'Content-Length: ' . filesize( $file_path ) );
+		readfile( $file_path );
+		exit;
 	}
 
 	/** @return void */
@@ -452,6 +543,29 @@ final class Admin_Controller {
 			ob_end_clean();
 			wp_send_json_error( array( 'message' => $exception->getMessage() ), 500 );
 		}
+	}
+
+	/**
+	 * @return Redirect_Export_Service
+	 */
+	private function redirect_export_service() {
+		$repository = new Manifest_Repository();
+		if ( ! $repository->table_exists() ) {
+			throw new \RuntimeException( 'The manifest table is not installed. Run Install / Check Manifest Table first.' );
+		}
+
+		return new Redirect_Export_Service( $repository );
+	}
+
+	/**
+	 * @param string $format Redirect export format.
+	 * @return string
+	 */
+	private function download_redirect_url( $format ) {
+		return wp_nonce_url(
+			admin_url( 'admin-post.php?action=media_flatten_download_redirect_export&format=' . rawurlencode( sanitize_key( $format ) ) ),
+			self::NONCE_ACTION
+		);
 	}
 
 	/**

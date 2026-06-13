@@ -1,15 +1,17 @@
 # Media Flatten Migrator
 
-Phase 6.5 provides WordPress admin and WP-CLI access to assessment, manifest,
-target resolution, collision detection, migration, and exact mapping-based URL
-replacement, plus comprehensive read-only verification and pre-redirect old URL auditing.
+Phase 7 provides WordPress admin and WP-CLI access to assessment, manifest,
+target resolution, collision detection, migration, exact mapping-based URL
+replacement, comprehensive read-only verification, pre-redirect old URL auditing,
+and exact redirect export generation.
 
 ## WordPress Admin
 
 Administrators can open **Tools > Media Flatten Migrator** to run safe,
-resumable AJAX batches for scan, target resolution, file migration, and exact URL
-replacement. Every write action requires confirmation. Dry runs do not write
-plugin job state or migration data.
+resumable AJAX batches for scan, target resolution, file migration, exact URL
+replacement, verification, old URL auditing, and redirect export generation.
+Every write action requires confirmation. Dry runs do not write plugin job state
+or migration data.
 
 ## Commands
 
@@ -36,6 +38,10 @@ wp media-flatten verify --strict
 wp media-flatten audit-old-urls
 wp media-flatten audit-old-urls --json
 wp media-flatten audit-old-urls --strict
+wp media-flatten redirects --format=apache
+wp media-flatten redirects --format=nginx
+wp media-flatten redirects --format=csv
+wp media-flatten redirects --format=apache --output=/tmp/media-flatten.conf
 ```
 
 `install` creates or updates the prefixed manifest table. Plugin activation also
@@ -76,6 +82,10 @@ and WooCommerce attachment-ID references. `--json` emits structured JSON and
 `audit-old-urls` performs a read-only pre-redirect safety audit across posts,
 post excerpts, postmeta, and options. It classifies remaining dated upload URLs
 as migrated leftovers, known non-migrated leftovers, or orphan leftovers.
+
+`redirects` exports exact mapping-based redirect rules from migrated manifest
+rows only. It can print Apache, Nginx, or CSV output to STDOUT or write the
+export to a file. CSV output is UTF-8 with a BOM for spreadsheet compatibility.
 
 The plugin never modifies GUIDs or attachment IDs and never moves or deletes old
 source files. File migration updates only the attachment path and metadata needed
