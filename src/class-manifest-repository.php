@@ -368,6 +368,55 @@ final class Manifest_Repository {
 	}
 
 	/**
+	 * Return every manifest old URL with status for audit classification.
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function get_all_old_url_rows() {
+		$sql = "SELECT id, attachment_id, old_url, status
+			FROM {$this->table_name}
+			WHERE old_url IS NOT NULL
+				AND old_url <> ''
+			ORDER BY id ASC";
+
+		return $this->wpdb->get_results( $sql, ARRAY_A );
+	}
+
+	/**
+	 * Return duplicate logical manifest groups using attachment, kind, and normalized size key.
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function get_duplicate_logical_groups() {
+		$sql = "SELECT attachment_id, file_kind,
+				COALESCE(NULLIF(size_key, ''), '__NULL__') AS normalized_size_key,
+				COUNT(*) AS duplicate_count
+			FROM {$this->table_name}
+			GROUP BY attachment_id, file_kind, COALESCE(NULLIF(size_key, ''), '__NULL__')
+			HAVING COUNT(*) > 1
+			ORDER BY attachment_id ASC, file_kind ASC, normalized_size_key ASC";
+
+		return $this->wpdb->get_results( $sql, ARRAY_A );
+	}
+
+	/**
+	 * Count migrated rows missing old or new URL values.
+	 *
+	 * @return int
+	 */
+	public function count_invalid_migrated_url_rows() {
+		if ( ! $this->table_exists() ) {
+			return 0;
+		}
+
+		return (int) $this->wpdb->get_var(
+			"SELECT COUNT(*) FROM {$this->table_name}
+			WHERE status = 'migrated'
+				AND ( old_url IS NULL OR old_url = '' OR new_url IS NULL OR new_url = '' )"
+		);
+	}
+
+	/**
 	 * Set migration state for selected manifest rows.
 	 *
 	 * @param array<int, int> $row_ids       Manifest row IDs.

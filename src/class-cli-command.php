@@ -427,6 +427,64 @@ final class CLI_Command {
 	}
 
 	/**
+	 * Run the pre-redirect old dated upload URL audit.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--json]
+	 * : Output valid machine-readable JSON.
+	 *
+	 * [--strict]
+	 * : Exit with an error when unsafe old URLs remain.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp media-flatten audit-old-urls
+	 *     wp media-flatten audit-old-urls --json
+	 *     wp media-flatten audit-old-urls --strict
+	 *
+	 * @param array<int, string>   $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Named arguments.
+	 * @return void
+	 */
+	public function audit_old_urls( $args, $assoc_args ) {
+		$json   = isset( $assoc_args['json'] );
+		$strict = isset( $assoc_args['strict'] );
+
+		try {
+			$repository = new Manifest_Repository();
+			if ( ! $repository->table_exists() ) {
+				\WP_CLI::error( 'Manifest table is not installed. Run: wp media-flatten install' );
+			}
+
+			$result = ( new Old_URL_Audit_Service( $repository ) )->run( 100 );
+			if ( $json ) {
+				\WP_CLI::line( wp_json_encode( $result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) );
+			} else {
+				\WP_CLI::log( 'Old URL audit: ' . ( $result['safe'] ? 'SAFE' : 'UNSAFE' ) );
+				$this->format_key_value_summary(
+					array(
+						'audited_at'                          => $result['audited_at'],
+						'migrated_mapping_old_url_remaining' => $result['migrated_mapping_old_url_remaining'],
+						'non_migrated_manifest_url_remaining' => $result['non_migrated_manifest_url_remaining'],
+						'orphan_old_upload_url_remaining'    => $result['orphan_old_upload_url_remaining'],
+						'generic_dated_upload_occurrences'   => $result['generic_dated_upload_occurrences'],
+					)
+				);
+			}
+
+			if ( $strict && ! $result['safe'] ) {
+				\WP_CLI::error( 'Old URL audit found unsafe dated upload URLs.' );
+			}
+			if ( ! $json ) {
+				\WP_CLI::success( 'Read-only old URL audit complete. No files or database records were changed.' );
+			}
+		} catch ( \RuntimeException $exception ) {
+			\WP_CLI::error( $exception->getMessage() );
+		}
+	}
+
+	/**
 	 * Run comprehensive read-only migration verification.
 	 *
 	 * ## OPTIONS
@@ -471,7 +529,11 @@ final class CLI_Command {
 						'missing_new_files'    => $result['missing_new_files'],
 						'integrity_mismatches' => $result['integrity_mismatches'],
 						'metadata_errors'      => $result['metadata_errors'],
-						'remaining_old_urls'   => array_sum( $result['old_url_occurrences'] ),
+						'migrated_old_urls'    => $result['migrated_mapping_old_url_remaining'],
+						'non_migrated_old_urls' => $result['non_migrated_manifest_url_remaining'],
+						'orphan_old_urls'      => $result['orphan_old_upload_url_remaining'],
+						'pre_redirect_ready'   => $result['pre_redirect_ready'] ? 'yes' : 'no',
+						'redirect_export_ready' => $result['redirect_export_ready'] ? 'yes' : 'no',
 					)
 				);
 				\WP_CLI::log( 'Sample errors:' );
@@ -537,13 +599,11 @@ final class CLI_Command {
 
 		$usage_reporter = new Usage_Reporter( $repository );
 		$batch_reporter = new Batch_Migrator( $repository, new Single_Attachment_Migrator( $repository ) );
-		$url_replacer   = new URL_Replacer( $repository->get_migrated_url_mappings() );
+		$verify         = get_option( Admin_Controller::VERIFY_RESULT_OPTION, array() );
+		$old_url_audit  = get_option( Admin_Controller::OLD_URL_AUDIT_RESULT_OPTION, array() );
 
 		\WP_CLI::log( 'Attachment batch migration readiness:' );
 		$this->format_key_value_summary( $batch_reporter->report_counts() );
-
-		\WP_CLI::log( 'Remaining migrated URL references:' );
-		$this->format_key_value_summary( $url_replacer->remaining_counts() );
 
 		\WP_CLI::log( 'Manifest attachment usage:' );
 		$this->format_items(
@@ -569,7 +629,7 @@ final class CLI_Command {
 			array( 'metric', 'value' )
 		);
 
-		$verify = get_option( 'media_flatten_last_verify_result', array() );
+		$verify = get_option( Admin_Controller::VERIFY_RESULT_OPTION, array() );
 		\WP_CLI::log( 'Latest verification summary:' );
 		$this->format_key_value_summary(
 			$verify
@@ -581,6 +641,22 @@ final class CLI_Command {
 					'missing_new_files'    => $verify['missing_new_files'] ?? 0,
 					'integrity_mismatches' => $verify['integrity_mismatches'] ?? 0,
 					'metadata_errors'      => $verify['metadata_errors'] ?? 0,
+					'pre_redirect_ready'   => ! empty( $verify['pre_redirect_ready'] ) ? 'yes' : 'no',
+					'redirect_export_ready' => ! empty( $verify['redirect_export_ready'] ) ? 'yes' : 'no',
+				)
+				: array( 'status' => 'Not run yet' )
+		);
+
+		$old_url_audit = get_option( Admin_Controller::OLD_URL_AUDIT_RESULT_OPTION, array() );
+		\WP_CLI::log( 'Latest old URL audit summary:' );
+		$this->format_key_value_summary(
+			$old_url_audit
+				? array(
+					'status'                              => ! empty( $old_url_audit['safe'] ) ? 'SAFE' : 'UNSAFE',
+					'audited_at'                          => $old_url_audit['audited_at'] ?? '-',
+					'migrated_mapping_old_url_remaining' => $old_url_audit['migrated_mapping_old_url_remaining'] ?? 0,
+					'non_migrated_manifest_url_remaining' => $old_url_audit['non_migrated_manifest_url_remaining'] ?? 0,
+					'orphan_old_upload_url_remaining'    => $old_url_audit['orphan_old_upload_url_remaining'] ?? 0,
 				)
 				: array( 'status' => 'Not run yet' )
 		);

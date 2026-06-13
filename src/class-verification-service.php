@@ -17,6 +17,9 @@ final class Verification_Service {
 	/** @var array<int, array<string, mixed>> */
 	private $mappings;
 
+	/** @var Old_URL_Audit_Service */
+	private $old_url_audit;
+
 	/**
 	 * @param Manifest_Repository $repository Manifest repository.
 	 */
@@ -32,6 +35,7 @@ final class Verification_Service {
 		$this->repository       = $repository;
 		$this->uploads_base_dir = untrailingslashit( wp_normalize_path( $uploads['basedir'] ) );
 		$this->mappings         = $repository->get_migrated_url_mappings();
+		$this->old_url_audit    = new Old_URL_Audit_Service( $repository );
 	}
 
 	/**
@@ -63,6 +67,18 @@ final class Verification_Service {
 			'old_source_missing_for_comparison' => 0,
 			'metadata_errors'                   => 0,
 			'woocommerce_reference_errors'      => 0,
+			'duplicate_manifest_rows'           => 0,
+			'pre_redirect_ready'                => false,
+			'redirect_export_ready'             => false,
+			'migrated_mapping_old_url_remaining' => 0,
+			'non_migrated_manifest_url_remaining' => 0,
+			'orphan_old_upload_url_remaining'   => 0,
+			'generic_dated_upload_occurrences'  => 0,
+			'old_url_audit_samples'             => array(
+				'migrated_mapping_old_url_remaining'  => array(),
+				'non_migrated_manifest_url_remaining' => array(),
+				'orphan_old_upload_url_remaining'     => array(),
+			),
 			'remaining_old_url_samples'         => array( 'post_content' => array(), 'post_excerpt' => array(), 'postmeta' => array(), 'options' => array() ),
 			'sample_errors'                     => array(),
 			'sample_warnings'                   => array(),
@@ -95,7 +111,18 @@ final class Verification_Service {
 	 * @return array<int, string>
 	 */
 	public function stages() {
-		return array( 'manifest', 'metadata', 'post_content', 'post_excerpt', 'postmeta', 'options', 'wc_product', 'wc_variation', 'wc_gallery' );
+		return array(
+			'manifest',
+			'duplicate_manifest',
+			'metadata',
+			'audit_post_content',
+			'audit_post_excerpt',
+			'audit_postmeta',
+			'audit_options',
+			'wc_product',
+			'wc_variation',
+			'wc_gallery',
+		);
 	}
 
 	/**
@@ -105,9 +132,7 @@ final class Verification_Service {
 	 */
 	public function estimate_total() {
 		$total = $this->repository->count_migrated_rows() + $this->repository->count_migrated_attachments();
-		$total += (int) $this->wpdb->get_var( "SELECT COUNT(*) FROM {$this->wpdb->posts}" ) * 2;
-		$total += (int) $this->wpdb->get_var( "SELECT COUNT(*) FROM {$this->wpdb->postmeta}" );
-		$total += (int) $this->wpdb->get_var( "SELECT COUNT(*) FROM {$this->wpdb->options}" );
+		$total += $this->old_url_audit->estimate_total();
 		$total += (int) $this->wpdb->get_var(
 			"SELECT COUNT(*) FROM {$this->wpdb->postmeta} WHERE meta_key IN ('_thumbnail_id', '_product_image_gallery')"
 		);
@@ -132,8 +157,11 @@ final class Verification_Service {
 		if ( 'metadata' === $stage ) {
 			return $this->verify_metadata_batch( $after_id, $limit, $result );
 		}
-		if ( in_array( $stage, array( 'post_content', 'post_excerpt', 'postmeta', 'options' ), true ) ) {
-			return $this->verify_url_batch( $stage, $after_id, $limit, $result );
+		if ( 'duplicate_manifest' === $stage ) {
+			return $this->verify_duplicate_manifest_rows( $result );
+		}
+		if ( 0 === strpos( $stage, 'audit_' ) ) {
+			return $this->verify_old_url_audit_batch( substr( $stage, 6 ), $after_id, $limit, $result );
 		}
 		if ( in_array( $stage, array( 'wc_product', 'wc_variation', 'wc_gallery' ), true ) ) {
 			return $this->verify_woocommerce_batch( $stage, $after_id, $limit, $result );
@@ -170,6 +198,29 @@ final class Verification_Service {
 	 * @return array<string, mixed>
 	 */
 	public function finalize( array $result ) {
+		foreach ( array(
+			'migrated_mapping_old_url_remaining'  => 'Migrated old upload URLs remain in scanned content.',
+			'non_migrated_manifest_url_remaining' => 'Known non-migrated manifest old URLs remain in scanned content.',
+			'orphan_old_upload_url_remaining'     => 'Orphan dated upload URLs remain in scanned content.',
+		) as $field => $message ) {
+			if ( $result[ $field ] > 0 ) {
+				$this->error( $result, $message );
+			}
+		}
+
+		$result['pre_redirect_ready'] = 0 === (int) $result['missing_new_files']
+			&& 0 === (int) $result['integrity_mismatches']
+			&& 0 === (int) $result['metadata_errors']
+			&& 0 === (int) $result['migrated_mapping_old_url_remaining']
+			&& 0 === (int) $result['non_migrated_manifest_url_remaining']
+			&& 0 === (int) $result['orphan_old_upload_url_remaining'];
+		$result['redirect_export_ready'] = 0 === (int) $result['errors_count']
+			&& $result['pre_redirect_ready']
+			&& 0 === (int) $this->repository->count_invalid_migrated_url_rows()
+			&& empty( $result['status_counts']['copying'] )
+			&& empty( $result['status_counts']['copied'] )
+			&& empty( $result['status_counts']['failed'] )
+			&& 0 === (int) $result['duplicate_manifest_rows'];
 		$result['pass']        = 0 === (int) $result['errors_count'];
 		$result['verified_at'] = current_time( 'mysql' );
 		return $result;
@@ -293,46 +344,64 @@ final class Verification_Service {
 	}
 
 	/** @return array<string, mixed> */
-	private function verify_url_batch( $area, $after_id, $limit, array $result ) {
-		$config = array(
-			'post_content' => array( $this->wpdb->posts, 'ID', 'post_content' ),
-			'post_excerpt' => array( $this->wpdb->posts, 'ID', 'post_excerpt' ),
-			'postmeta'     => array( $this->wpdb->postmeta, 'meta_id', 'meta_value' ),
-			'options'      => array( $this->wpdb->options, 'option_id', 'option_value' ),
-		);
-		list( $table, $id_field, $value_field ) = $config[ $area ];
-		$rows = $this->wpdb->get_results(
-			$this->wpdb->prepare(
-				"SELECT {$id_field}, {$value_field} FROM {$table}
-				WHERE {$id_field} > %d ORDER BY {$id_field} ASC LIMIT %d",
-				(int) $after_id,
-				$limit
-			),
-			ARRAY_A
-		);
+	private function verify_duplicate_manifest_rows( array $result ) {
+		$groups = $this->repository->get_duplicate_logical_groups();
 
-		foreach ( $rows as $row ) {
-			$after_id = (int) $row[ $id_field ];
-			$value    = (string) $row[ $value_field ];
-			$old_hits = 0;
-			$new_hits = 0;
-			foreach ( $this->mappings as $mapping ) {
-				$old_hits += $this->count_url_variants( $value, $mapping['old_url'] );
-				$new_hits += $this->count_url_variants( $value, $mapping['new_url'] );
-			}
-			if ( $old_hits > 0 ) {
-				$result['old_url_occurrences'][ $area ] += $old_hits;
-				$this->sample( $result['remaining_old_url_samples'][ $area ], $after_id );
-				$this->warning( $result, sprintf( '%s row %d still contains %d migrated old URL occurrence(s).', $area, $after_id, $old_hits ) );
-			}
-			$result['new_url_occurrences'][ $area ] += $new_hits;
-			$result['dated_upload_url_occurrences'] += preg_match_all(
-				'~(?:/|\\\\/)wp-content(?:/|\\\\/)uploads(?:/|\\\\/)[0-9]{4}(?:/|\\\\/)[0-9]{2}(?:/|\\\\/)~',
-				$value
+		foreach ( $groups as $group ) {
+			$result['duplicate_manifest_rows'] += (int) $group['duplicate_count'];
+			$this->error(
+				$result,
+				sprintf(
+					'Duplicate manifest logical rows detected for attachment %d, file_kind %s, size_key %s.',
+					$group['attachment_id'],
+					$group['file_kind'],
+					'__NULL__' === $group['normalized_size_key'] ? '(null)' : $group['normalized_size_key']
+				)
 			);
 		}
 
-		return $this->batch_response( $rows, $after_id, $limit, $result );
+		return array(
+			'result'            => $result,
+			'processed'         => count( $groups ),
+			'last_processed_id' => 0,
+			'done'              => true,
+		);
+	}
+
+	/**
+	 * @param string               $area     Audit area.
+	 * @param int                  $after_id Cursor.
+	 * @param int                  $limit    Batch size.
+	 * @param array<string, mixed> $result   Result.
+	 * @return array<string, mixed>
+	 */
+	private function verify_old_url_audit_batch( $area, $after_id, $limit, array $result ) {
+		$audit_batch = $this->old_url_audit->run_batch(
+			$area,
+			$after_id,
+			$limit,
+			array(
+				'migrated_mapping_old_url_remaining'  => $result['migrated_mapping_old_url_remaining'],
+				'non_migrated_manifest_url_remaining' => $result['non_migrated_manifest_url_remaining'],
+				'orphan_old_upload_url_remaining'     => $result['orphan_old_upload_url_remaining'],
+				'generic_dated_upload_occurrences'    => $result['generic_dated_upload_occurrences'],
+				'samples'                             => $result['old_url_audit_samples'],
+			)
+		);
+		$audit_result = $audit_batch['result'];
+
+		$result['migrated_mapping_old_url_remaining']  = $audit_result['migrated_mapping_old_url_remaining'];
+		$result['non_migrated_manifest_url_remaining'] = $audit_result['non_migrated_manifest_url_remaining'];
+		$result['orphan_old_upload_url_remaining']     = $audit_result['orphan_old_upload_url_remaining'];
+		$result['generic_dated_upload_occurrences']    = $audit_result['generic_dated_upload_occurrences'];
+		$result['old_url_audit_samples']               = $audit_result['samples'];
+
+		return array(
+			'result'            => $result,
+			'processed'         => $audit_batch['processed'],
+			'last_processed_id' => $audit_batch['last_processed_id'],
+			'done'              => $audit_batch['done'],
+		);
 	}
 
 	/** @return array<string, mixed> */
@@ -376,53 +445,6 @@ final class Verification_Service {
 		}
 
 		return $this->batch_response( $rows, $after_id, $limit, $result );
-	}
-
-	/** @return int */
-	private function count_url_variants( $value, $url ) {
-		$path     = (string) parse_url( $url, PHP_URL_PATH );
-		$variants = array( $url, $path, $this->encode_url_path( $url ), $this->encode_path( $path ) );
-		$count    = 0;
-		$seen     = array();
-		foreach ( $variants as $variant ) {
-			foreach ( array( $variant, str_replace( '/', '\\/', $variant ) ) as $candidate ) {
-				if ( '' !== $candidate && empty( $seen[ $candidate ] ) ) {
-					$seen[ $candidate ] = true;
-				}
-			}
-		}
-		$variants = array_keys( $seen );
-		usort(
-			$variants,
-			static function ( $left, $right ) {
-				return strlen( $right ) <=> strlen( $left );
-			}
-		);
-		$remaining = $value;
-		foreach ( $variants as $candidate ) {
-			$hits = substr_count( $remaining, $candidate );
-			if ( $hits ) {
-				$count     += $hits;
-				$remaining = str_replace( $candidate, '', $remaining );
-			}
-		}
-		return $count;
-	}
-
-	/** @return string */
-	private function encode_url_path( $url ) {
-		$path = (string) parse_url( $url, PHP_URL_PATH );
-		return str_replace( $path, $this->encode_path( $path ), $url );
-	}
-
-	/** @return string */
-	private function encode_path( $path ) {
-		$segments = explode( '/', $path );
-		foreach ( $segments as &$segment ) {
-			$segment = rawurlencode( rawurldecode( $segment ) );
-		}
-		unset( $segment );
-		return implode( '/', $segments );
 	}
 
 	/** @return string */

@@ -1,8 +1,8 @@
 # Media Flatten Migrator
 
-Phase 6 provides WordPress admin and WP-CLI access to assessment, manifest,
+Phase 6.5 provides WordPress admin and WP-CLI access to assessment, manifest,
 target resolution, collision detection, migration, and exact mapping-based URL
-replacement, plus comprehensive read-only verification.
+replacement, plus comprehensive read-only verification and pre-redirect old URL auditing.
 
 ## WordPress Admin
 
@@ -33,6 +33,9 @@ wp media-flatten report
 wp media-flatten verify
 wp media-flatten verify --json
 wp media-flatten verify --strict
+wp media-flatten audit-old-urls
+wp media-flatten audit-old-urls --json
+wp media-flatten audit-old-urls --strict
 ```
 
 `install` creates or updates the prefixed manifest table. Plugin activation also
@@ -69,6 +72,10 @@ JSON are handled structurally. Add `--dry-run` for a strictly read-only preview.
 integrity, attachment metadata, remaining URL references, filename preservation,
 and WooCommerce attachment-ID references. `--json` emits structured JSON and
 `--strict` exits with an error when verification errors exist.
+
+`audit-old-urls` performs a read-only pre-redirect safety audit across posts,
+post excerpts, postmeta, and options. It classifies remaining dated upload URLs
+as migrated leftovers, known non-migrated leftovers, or orphan leftovers.
 
 The plugin never modifies GUIDs or attachment IDs and never moves or deletes old
 source files. File migration updates only the attachment path and metadata needed

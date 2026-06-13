@@ -15,6 +15,8 @@
 	var clearLockButton = document.getElementById('mfm-clear-lock');
 	var verifyStatus = document.getElementById('mfm-verify-status');
 	var verifyResult = document.getElementById('mfm-verify-result');
+	var auditStatus = document.getElementById('mfm-audit-status');
+	var auditResult = document.getElementById('mfm-audit-result');
 
 	function request(action, data) {
 		var body = new URLSearchParams(Object.assign({ action: action, nonce: config.nonce }, data || {}));
@@ -79,7 +81,12 @@
 			data.dry_job = JSON.stringify(currentJob);
 		}
 
-		var batchAction = currentJob.base_type === 'verify' ? 'media_flatten_run_verify_batch' : 'media_flatten_run_batch';
+		var batchAction = 'media_flatten_run_batch';
+		if (currentJob.base_type === 'verify') {
+			batchAction = 'media_flatten_run_verify_batch';
+		} else if (currentJob.base_type === 'old_url_audit') {
+			batchAction = 'media_flatten_run_old_url_audit_batch';
+		}
 		request(batchAction, data).then(function (response) {
 			renderJob(response.job);
 			latest.textContent = JSON.stringify(response.latest, null, 2);
@@ -106,7 +113,13 @@
 		}
 
 		stoppedLocally = false;
-		request(type === 'verify' ? 'media_flatten_start_verify' : 'media_flatten_start_job', {
+		var startAction = 'media_flatten_start_job';
+		if (type === 'verify') {
+			startAction = 'media_flatten_start_verify';
+		} else if (type === 'old_url_audit') {
+			startAction = 'media_flatten_start_old_url_audit';
+		}
+		request(startAction, {
 			job_type: type,
 			batch_size: type === 'install' ? 1 : batchSize(base)
 		}).then(function (response) {
@@ -138,6 +151,7 @@
 	function refreshReport() {
 		request('media_flatten_get_report').then(function (report) {
 			var verify = report.verify || {};
+			var audit = report.old_url_audit || {};
 			var cards = [
 				['Manifest table', report.table_exists ? 'Installed' : 'Missing'],
 				['Total manifest rows', report.total_rows],
@@ -151,10 +165,6 @@
 				['PNG', report.extensions.png || 0],
 				['JPG/JPEG', report.extensions['jpg/jpeg'] || 0],
 				['Non-ASCII filenames', report.non_ascii || 0],
-				['Old URLs in content', report.remaining.migrated_rows_old_url_in_post_content || 0],
-				['Old URLs in excerpts', report.remaining.migrated_rows_old_url_in_post_excerpt || 0],
-				['Old URLs in postmeta', report.remaining.migrated_rows_old_url_in_postmeta || 0],
-				['Old URLs in options', report.remaining.migrated_rows_old_url_in_options || 0],
 				['Last verification', verify.verified_at ? (verify.pass ? 'PASS' : 'FAIL') : 'Not run yet'],
 				['Verification time', verify.verified_at || '-'],
 				['Verify errors', verify.errors_count || 0],
@@ -162,13 +172,20 @@
 				['Missing new files', verify.missing_new_files || 0],
 				['Integrity mismatches', verify.integrity_mismatches || 0],
 				['Metadata errors', verify.metadata_errors || 0],
-				['Verify remaining old URLs', verify.old_url_occurrences ? Object.values(verify.old_url_occurrences).reduce(function (sum, count) { return sum + count; }, 0) : 0]
+				['Verify remaining old URLs', (verify.migrated_mapping_old_url_remaining || 0) + (verify.non_migrated_manifest_url_remaining || 0) + (verify.orphan_old_upload_url_remaining || 0)],
+				['Old URL audit', audit.audited_at ? (audit.safe ? 'Safe' : 'Unsafe') : 'Not run yet'],
+				['Migrated old URLs', audit.migrated_mapping_old_url_remaining || 0],
+				['Non-migrated URLs', audit.non_migrated_manifest_url_remaining || 0],
+				['Orphan dated URLs', audit.orphan_old_upload_url_remaining || 0],
+				['Dated URL occurrences', audit.generic_dated_upload_occurrences || 0],
+				['Redirect Export Ready', report.redirect_export_ready ? 'Yes' : 'No']
 			];
 			document.getElementById('mfm-status-cards').innerHTML = cards.map(function (card) {
 				return '<div class="mfm-card"><strong>' + escapeHtml(String(card[1])) + '</strong><span>' + escapeHtml(card[0]) + '</span></div>';
 			}).join('');
 			clearLockButton.hidden = !report.lock_is_stale;
 			renderVerify(report.verify);
+			renderAudit(report.old_url_audit);
 			if (report.job && report.job.job_type && !running && (!currentJob || !currentJob.dry_run)) {
 				renderJob(report.job);
 			}
@@ -190,9 +207,32 @@
 		verifyResult.textContent = JSON.stringify(result, null, 2);
 	}
 
+	function renderAudit(result) {
+		if (!result || !result.audited_at) {
+			auditStatus.className = 'mfm-verify-status';
+			auditStatus.textContent = 'Not run yet.';
+			auditResult.textContent = 'No old URL audit result stored.';
+			return;
+		}
+		auditStatus.className = 'mfm-verify-status ' + (result.safe ? 'mfm-pass' : 'mfm-fail');
+		auditStatus.textContent = (result.safe ? 'SAFE' : 'UNSAFE') + ' | ' + result.audited_at +
+			' | migrated ' + result.migrated_mapping_old_url_remaining +
+			' | non-migrated ' + result.non_migrated_manifest_url_remaining +
+			' | orphan ' + result.orphan_old_upload_url_remaining;
+		auditResult.textContent = JSON.stringify(result, null, 2);
+	}
+
 	function refreshVerify() {
 		request('media_flatten_get_verify_result').then(function (response) {
 			renderVerify(response.result);
+		}).catch(function (error) {
+			showNotice(error.message, 'error');
+		});
+	}
+
+	function refreshAudit() {
+		request('media_flatten_get_old_url_audit_result').then(function (response) {
+			renderAudit(response.result);
 		}).catch(function (error) {
 			showNotice(error.message, 'error');
 		});
@@ -211,6 +251,7 @@
 	});
 	document.querySelector('[data-mfm-refresh]').addEventListener('click', refreshReport);
 	document.getElementById('mfm-refresh-verify').addEventListener('click', refreshVerify);
+	document.getElementById('mfm-refresh-audit').addEventListener('click', refreshAudit);
 	stopButton.addEventListener('click', stopJob);
 	resumeButton.addEventListener('click', function () {
 		if (currentJob && !currentJob.dry_run) {
