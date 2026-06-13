@@ -203,6 +203,131 @@ final class Manifest_Repository {
 		return array_map( 'intval', $this->wpdb->get_col( $sql ) );
 	}
 
+	/**
+	 * Return migrated rows eligible for old-file deletion.
+	 *
+	 * @param int $after_id Only return IDs greater than this value.
+	 * @param int $limit    Maximum rows to return.
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function get_deletion_rows( $after_id, $limit ) {
+		$sql = $this->wpdb->prepare(
+			"SELECT id, attachment_id, old_rel_path, old_abs_path, new_rel_path, new_abs_path,
+				old_url, new_url, file_kind, size_key, status, old_deleted_at, old_delete_status, old_delete_error
+			FROM {$this->table_name}
+			WHERE status = 'migrated'
+				AND ( old_delete_status IS NULL OR old_delete_status = '' )
+				AND id > %d
+			ORDER BY id ASC
+			LIMIT %d",
+			(int) $after_id,
+			max( 1, (int) $limit )
+		);
+
+		return $this->wpdb->get_results( $sql, ARRAY_A );
+	}
+
+	/**
+	 * Count migrated rows waiting for old-file deletion.
+	 *
+	 * @return int
+	 */
+	public function count_deletion_candidates() {
+		if ( ! $this->table_exists() ) {
+			return 0;
+		}
+
+		return (int) $this->wpdb->get_var(
+			"SELECT COUNT(*)
+			FROM {$this->table_name}
+			WHERE status = 'migrated'
+				AND ( old_delete_status IS NULL OR old_delete_status = '' )"
+		);
+	}
+
+	/**
+	 * Count migrated rows whose old file has already been deleted.
+	 *
+	 * @return int
+	 */
+	public function count_deleted_old_files() {
+		if ( ! $this->table_exists() ) {
+			return 0;
+		}
+
+		return (int) $this->wpdb->get_var(
+			"SELECT COUNT(*)
+			FROM {$this->table_name}
+			WHERE status = 'migrated'
+				AND old_delete_status = 'deleted'"
+		);
+	}
+
+	/**
+	 * Count migrated rows whose old file was already missing.
+	 *
+	 * @return int
+	 */
+	public function count_already_missing_old_files() {
+		if ( ! $this->table_exists() ) {
+			return 0;
+		}
+
+		return (int) $this->wpdb->get_var(
+			"SELECT COUNT(*)
+			FROM {$this->table_name}
+			WHERE status = 'migrated'
+				AND old_delete_status = 'already_missing'"
+		);
+	}
+
+	/**
+	 * Count migrated rows whose old-file deletion failed.
+	 *
+	 * @return int
+	 */
+	public function count_failed_old_file_deletions() {
+		if ( ! $this->table_exists() ) {
+			return 0;
+		}
+
+		return (int) $this->wpdb->get_var(
+			"SELECT COUNT(*)
+			FROM {$this->table_name}
+			WHERE status = 'migrated'
+				AND old_delete_status = 'failed'"
+		);
+	}
+
+	/**
+	 * Update only the old-file deletion tracking fields.
+	 *
+	 * @param int         $id           Manifest row ID.
+	 * @param string      $status       Deletion status.
+	 * @param string|null $error_message Error message.
+	 * @return void
+	 */
+	public function update_old_delete_status( $id, $status, $error_message = null ) {
+		$data = array(
+			'old_delete_status' => $status,
+			'old_delete_error'  => $error_message,
+			'old_deleted_at'    => current_time( 'mysql' ),
+			'updated_at'        => current_time( 'mysql' ),
+		);
+
+		$result = $this->wpdb->update(
+			$this->table_name,
+			$data,
+			array( 'id' => (int) $id ),
+			array( '%s', '%s', '%s', '%s' ),
+			array( '%d' )
+		);
+
+		if ( false === $result ) {
+			throw new \RuntimeException( 'Could not update old-file deletion status: ' . $this->wpdb->last_error );
+		}
+	}
+
 	/** @return int */
 	public function count_migrated_rows() {
 		if ( ! $this->table_exists() ) {

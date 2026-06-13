@@ -3,7 +3,7 @@
 namespace MediaFlattenMigrator;
 
 final class Schema {
-	const VERSION        = '1.0.0';
+	const VERSION        = '1.1.0';
 	const VERSION_OPTION = 'media_flatten_manifest_schema_version';
 
 	/**
@@ -46,6 +46,9 @@ final class Schema {
 			updated_at datetime NOT NULL,
 			migrated_at datetime NULL,
 			verified_at datetime NULL,
+			old_deleted_at datetime NULL,
+			old_delete_status varchar(32) NULL,
+			old_delete_error text NULL,
 			PRIMARY KEY  (id),
 			KEY attachment_id (attachment_id),
 			KEY status (status),

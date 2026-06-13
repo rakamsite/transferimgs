@@ -10,6 +10,7 @@ final class Admin_Controller {
 	const VERIFY_RESULT_OPTION = 'media_flatten_last_verify_result';
 	const OLD_URL_AUDIT_RESULT_OPTION = 'media_flatten_last_old_url_audit_result';
 	const REDIRECT_EXPORT_RESULT_OPTION = 'media_flatten_last_redirect_export_result';
+	const DELETE_RESULT_OPTION = 'media_flatten_last_delete_result';
 	const STALE_SECONDS   = 900;
 	const LOG_LIMIT       = 60;
 
@@ -21,6 +22,7 @@ final class Admin_Controller {
 		'replace_urls' => 50,
 		'verify'       => 100,
 		'old_url_audit' => 100,
+		'delete_old_files' => 10,
 	);
 
 	/** @var array<string, int> */
@@ -31,6 +33,7 @@ final class Admin_Controller {
 		'replace_urls' => 500,
 		'verify'       => 500,
 		'old_url_audit' => 500,
+		'delete_old_files' => 50,
 	);
 
 	/**
@@ -54,6 +57,10 @@ final class Admin_Controller {
 		add_action( 'wp_ajax_media_flatten_get_old_url_audit_result', array( $this, 'ajax_get_old_url_audit_result' ) );
 		add_action( 'wp_ajax_media_flatten_preview_redirects', array( $this, 'ajax_preview_redirects' ) );
 		add_action( 'wp_ajax_media_flatten_generate_redirect_export', array( $this, 'ajax_generate_redirect_export' ) );
+		add_action( 'wp_ajax_media_flatten_start_delete_old_files', array( $this, 'ajax_start_delete_old_files' ) );
+		add_action( 'wp_ajax_media_flatten_delete_old_files_dry_run', array( $this, 'ajax_delete_old_files_dry_run' ) );
+		add_action( 'wp_ajax_media_flatten_delete_old_files_batch', array( $this, 'ajax_delete_old_files_batch' ) );
+		add_action( 'wp_ajax_media_flatten_get_delete_report', array( $this, 'ajax_get_delete_report' ) );
 		add_action( 'admin_post_media_flatten_download_redirect_export', array( $this, 'admin_post_download_redirect_export' ) );
 	}
 
@@ -81,13 +88,13 @@ final class Admin_Controller {
 			'media-flatten-admin',
 			plugins_url( '../assets/admin.css', __FILE__ ),
 			array(),
-			'0.9.0'
+			'1.1.0'
 		);
 		wp_enqueue_script(
 			'media-flatten-admin',
 			plugins_url( '../assets/admin.js', __FILE__ ),
 			array(),
-			'0.9.0',
+			'1.1.0',
 			true
 		);
 		wp_localize_script(
@@ -181,6 +188,31 @@ final class Admin_Controller {
 			</section>
 
 			<section class="mfm-panel">
+				<h2>Delete Old Files</h2>
+				<p><strong>Destructive:</strong> this deletes old source files after a successful migration. Take a full backup first.</p>
+				<label style="display:block;">
+					<input type="checkbox" id="mfm-delete-confirm-check">
+					I have a full backup and understand this will delete old source files.
+				</label>
+				<label style="display:block;margin-top:8px;">
+					Type DELETE OLD FILES to confirm
+					<input type="text" id="mfm-delete-confirm-phrase" autocomplete="off" spellcheck="false">
+				</label>
+				<label>
+					Batch size
+					<input type="number" min="1" max="<?php echo esc_attr( $this->maximums['delete_old_files'] ); ?>"
+						value="<?php echo esc_attr( $this->defaults['delete_old_files'] ); ?>" data-mfm-batch="delete_old_files">
+				</label>
+				<p>
+					<button class="button button-primary" data-mfm-action="delete_old_files_dry_run">Dry Run Delete Old Files</button>
+					<button class="button button-primary" data-mfm-action="delete_old_files" id="mfm-delete-run">Delete Old Files Batch</button>
+					<button class="button" id="mfm-refresh-delete">Refresh Deletion Report</button>
+				</p>
+				<div id="mfm-delete-status" class="mfm-verify-status">Not run yet.</div>
+				<pre id="mfm-delete-result">No deletion report stored.</pre>
+			</section>
+
+			<section class="mfm-panel">
 				<h2>Current Job</h2>
 				<div class="mfm-progress"><span id="mfm-progress-bar"></span></div>
 				<p id="mfm-progress-text">No job running.</p>
@@ -243,11 +275,16 @@ final class Admin_Controller {
 				$verify = get_option( self::VERIFY_RESULT_OPTION, array() );
 				$audit = get_option( self::OLD_URL_AUDIT_RESULT_OPTION, array() );
 				$redirect_export = get_option( self::REDIRECT_EXPORT_RESULT_OPTION, array() );
+				$delete_result = get_option( self::DELETE_RESULT_OPTION, array() );
 				$redirect_service = null;
 				$redirect_readiness = array();
+				$delete_service = null;
+				$delete_readiness = array();
 				if ( $repository->table_exists() ) {
 					$redirect_service   = new Redirect_Export_Service( $repository );
 					$redirect_readiness = $redirect_service->readiness();
+					$delete_service     = new Old_File_Deletion_Service( $repository );
+					$delete_readiness   = $delete_service->readiness();
 				}
 
 				return array(
@@ -266,6 +303,9 @@ final class Admin_Controller {
 					'redirect_preview_ready'   => ! empty( $redirect_readiness['redirect_preview_ready'] ),
 					'redirect_export_ready'    => ! empty( $redirect_readiness['redirect_export_ready'] ),
 					'redirect_readiness'      => $redirect_readiness,
+					'delete_old_files'        => $delete_result,
+					'delete_old_files_ready'  => ! empty( $delete_readiness['delete_old_files_ready'] ),
+					'delete_readiness'        => $delete_readiness,
 				);
 			}
 		);
@@ -314,6 +354,31 @@ final class Admin_Controller {
 	}
 
 	/** @return void */
+	public function ajax_delete_old_files_dry_run() {
+		$_POST['job_type'] = 'delete_old_files_dry_run';
+		$this->ajax_start_job();
+	}
+
+	/** @return void */
+	public function ajax_delete_old_files_batch() {
+		$_POST['required_job_type'] = 'delete_old_files';
+		$this->ajax_run_batch();
+	}
+
+	/** @return void */
+	public function ajax_get_delete_report() {
+		$this->ajax_guard(
+			function () {
+				$service = $this->delete_old_files_service();
+				return array(
+					'result'    => $service->report( 100, true ),
+					'readiness' => $service->readiness(),
+				);
+			}
+		);
+	}
+
+	/** @return void */
 	public function ajax_preview_redirects() {
 		$this->ajax_guard(
 			function () {
@@ -348,6 +413,12 @@ final class Admin_Controller {
 				);
 			}
 		);
+	}
+
+	/** @return void */
+	public function ajax_start_delete_old_files() {
+		$_POST['job_type'] = 'delete_old_files';
+		$this->ajax_start_job();
 	}
 
 	/** @return void */
@@ -422,6 +493,12 @@ final class Admin_Controller {
 				}
 				if ( $current && $this->is_stale( $current ) ) {
 					throw new \RuntimeException( 'A stale job lock exists. Review it and use Clear Stale Lock before starting another job.' );
+				}
+				if ( 'delete_old_files' === $base_type && ! $dry_run ) {
+					$confirmed = ! empty( $_POST['delete_confirm_checked'] ) && 'DELETE OLD FILES' === trim( (string) ( $_POST['delete_confirm_phrase'] ?? '' ) );
+					if ( ! $confirmed ) {
+						throw new \RuntimeException( 'Old-file deletion requires the backup checkbox and the exact confirmation phrase DELETE OLD FILES.' );
+					}
 				}
 
 				$job = $this->new_job( $type, $base_type, $batch_size, $dry_run );
@@ -568,6 +645,18 @@ final class Admin_Controller {
 	}
 
 	/**
+	 * @return Old_File_Deletion_Service
+	 */
+	private function delete_old_files_service() {
+		$repository = new Manifest_Repository();
+		if ( ! $repository->table_exists() ) {
+			throw new \RuntimeException( 'The manifest table is not installed. Run Install / Check Manifest Table first.' );
+		}
+
+		return new Old_File_Deletion_Service( $repository );
+	}
+
+	/**
 	 * @param string $format Redirect export format.
 	 * @return string
 	 */
@@ -607,6 +696,8 @@ final class Admin_Controller {
 			$total = ( new Verification_Service( $repository ) )->estimate_total();
 		} elseif ( 'old_url_audit' === $base_type ) {
 			$total = ( new Old_URL_Audit_Service( $repository ) )->estimate_total();
+		} elseif ( 'delete_old_files' === $base_type ) {
+			$total = ( new Old_File_Deletion_Service( $repository ) )->estimate_total();
 		}
 
 		$job = array(
@@ -631,6 +722,16 @@ final class Admin_Controller {
 		}
 		if ( 'old_url_audit' === $base_type ) {
 			$job['old_url_audit_result'] = ( new Old_URL_Audit_Service( $repository ) )->initial_result();
+		}
+		if ( 'delete_old_files' === $base_type ) {
+			$delete_service = new Old_File_Deletion_Service( $repository );
+			if ( ! $dry_run ) {
+				$report = $delete_service->report( 100, true );
+				if ( empty( $report['ready'] ) ) {
+					throw new \RuntimeException( 'Old-file deletion is not ready yet. Review verification, old URL audit, redirect export, and deletion report results before proceeding.' );
+				}
+			}
+			$job['delete_old_files_result'] = $delete_service->initial_result();
 		}
 
 		return $job;
@@ -775,6 +876,24 @@ final class Admin_Controller {
 					+ $job['old_url_audit_result']['orphan_old_upload_url_remaining'];
 				update_option( self::OLD_URL_AUDIT_RESULT_OPTION, $job['old_url_audit_result'], false );
 				$latest['result'] = $job['old_url_audit_result'];
+			}
+		} elseif ( 'delete_old_files' === $job['base_type'] ) {
+			$delete_service = new Old_File_Deletion_Service( $repository );
+			$result         = $delete_service->run_batch( $cursor, $batch, $job['delete_old_files_result'], $dry_run );
+			$job['delete_old_files_result'] = $result['result'];
+			$job['processed_items']        += $result['processed'];
+			$job['last_processed_id']       = $result['last_manifest_id'];
+			$job['success_count']          += $dry_run ? $result['summary']['eligible'] : $result['summary']['deleted'];
+			$job['skipped_count']          += $result['summary']['skipped'];
+			$job['failed_count']           += $result['summary']['failed'];
+			$done                           = $result['done'];
+			$latest                         = array( 'summary' => $result['summary'], 'result' => $result['result'] );
+			if ( $done ) {
+				$job['delete_old_files_result'] = $delete_service->finalize( $job['delete_old_files_result'], $dry_run );
+				$latest['result']               = $job['delete_old_files_result'];
+			}
+			if ( ! $dry_run ) {
+				$delete_service->store_state( $job['delete_old_files_result'] );
 			}
 		}
 
